@@ -69,6 +69,7 @@ class L1Result:
 
     ``frame`` is None with no frame to serve, and then ``scores`` and ``patches`` are empty. A
     sensor with no score or no patch has no entry in them. A patch is height × width × RGB, 8 bits.
+    ``wrong_frame_size`` says ``frame`` is not at ``camera.resolution``.
     """
 
     frame: Frame | None
@@ -77,6 +78,7 @@ class L1Result:
     threshold: float | None
     patches: Mapping[str, npt.NDArray[np.uint8]]
     archive_id: str | None
+    wrong_frame_size: bool = False
 
 
 @dataclass(frozen=True)
@@ -243,6 +245,7 @@ class _Scored:
     classify_ms: float | None = None
     scores: Mapping[str, float] = field(default_factory=dict)
     patches: Mapping[str, npt.NDArray[np.uint8]] = field(default_factory=dict)
+    wrong_frame_size: bool = False
 
 
 def _decode(jpeg: bytes) -> npt.NDArray[np.uint8] | None:
@@ -338,14 +341,19 @@ class L1Loop:
             self._advance()
 
     def stats(self) -> L1Stats:
+        return self.read()[1]
+
+    def read(self) -> tuple[L1Result, L1Stats]:
+        """``latest()`` and ``stats()`` at one moment. A result that has a frame comes with that
+        frame's stage times."""
         with self._lock:
-            self._advance()
+            result = self._advance()
             times = self._newest_times
             now = time.monotonic()
             self._forget_results(now)
             count = len(self._results_at)
             rate = (count - 1) / (now - self._results_at[0]) if count > 1 else 0.0
-            return L1Stats(
+            return result, L1Stats(
                 capture_ms=times.capture_ms if times is not None else None,
                 decode_ms=times.decode_ms if times is not None else None,
                 cut_ms=times.cut_ms if times is not None else None,
@@ -407,7 +415,7 @@ class L1Loop:
                 id: L1Entry("unknown", reason=geometry.unknown.get(id, _WRONG_FRAME_SIZE))
                 for id in geometry.sensor_ids
             }
-            return _Scored(frame, geometry, l1, capture_ms, decode_ms)
+            return _Scored(frame, geometry, l1, capture_ms, decode_ms, wrong_frame_size=True)
         l1 = {id: L1Entry("unknown", reason=reason) for id, reason in geometry.unknown.items()}
         if self._scorer is None or geometry.dpt is None or not geometry.to_score:
             return _Scored(frame, geometry, l1, capture_ms, decode_ms)
@@ -481,5 +489,11 @@ class L1Loop:
         if scored is None:
             return L1Result(None, l1, {}, threshold, {}, geometry.archive_id)
         return L1Result(
-            scored.frame, l1, scored.scores, threshold, scored.patches, geometry.archive_id
+            scored.frame,
+            l1,
+            scored.scores,
+            threshold,
+            scored.patches,
+            geometry.archive_id,
+            scored.wrong_frame_size,
         )
