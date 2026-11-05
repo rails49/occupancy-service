@@ -1,5 +1,7 @@
 """Profile files: what a shipped profile sends, and what a bad file is refused for."""
 
+import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +164,15 @@ def test_refuses_a_bad_profile_and_says_why(tmp_path: Path, change: Any, complai
     with pytest.raises(ProfileError, match=complaint) as caught:
         load_profile(str(path))
     assert str(path) in str(caught.value)
+
+
+def test_the_readme_shows_the_shipped_profiles_as_they_are() -> None:
+    root = Path(__file__).parent.parent
+    readme = (root / "README.md").read_text()
+    examples = [tomllib.loads(block) for block in re.findall(r"```toml\n(.*?)```", readme, re.S)]
+    shipped = root / "src" / "occupancy_service" / "profiles"
+    for name in ("occupancy", "control"):
+        assert tomllib.loads((shipped / f"{name}.toml").read_text()) in examples
 
 
 def test_refuses_a_profile_that_does_not_exist(tmp_path: Path) -> None:
