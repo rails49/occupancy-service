@@ -1,0 +1,19 @@
+# The contract is rails49/control#1147. There is no last will: layout has a timer per sensor.
+topic = "tc49/layout/sensor"
+retain = false
+qos = 0
+# That timer wants every sensor at least once a second, so a repeat a little late must still do.
+repeat = 0.9
+
+[payload.occupied]
+addr = "{sensor}"
+occupancy = "occupied"
+
+[payload.clear]
+addr = "{sensor}"
+occupancy = "clear"
+
+[payload.unknown]
+addr = "{sensor}"
+occupancy = "unknown"
+reason = "{reason}"

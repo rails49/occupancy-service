@@ -1,0 +1,196 @@
+"""Profile files: how L1 goes out over MQTT. The README documents the format."""
+
+import json
+import math
+import re
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from occupancy_service.l1 import L1Entry
+
+_SHIPPED = Path(__file__).parent / "profiles"
+_KEYS = {"topic", "payload", "retain", "qos", "repeat"}
+_STATES = ("occupied", "clear", "unknown")
+_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+_TOPIC_PLACEHOLDERS = {"archive_id", "sensor"}
+_PAYLOAD_PLACEHOLDERS = {
+    "occupied": {"sensor", "confidence"},
+    "clear": {"sensor"},
+    "unknown": {"sensor", "reason"},
+}
+_NOT_IN_A_TOPIC = re.compile(r"[+#\0]")
+_NOT_IN_A_LEVEL = re.compile(r"[+#/\0]")
+_TOPIC_BYTES = 65535  # The most a topic can hold in MQTT.
+
+type Message = str | dict[str, Any]
+
+
+class ProfileError(ValueError):
+    """A profile that cannot be read, or that says something this service cannot do."""
+
+
+def encode(message: Message) -> bytes:
+    """What goes out: a table as JSON, and a string as text."""
+    if isinstance(message, str):
+        return message.encode(errors="replace")  # A hand-edited sensor id may not be valid text.
+    return json.dumps(message, allow_nan=False).encode()
+
+
+@dataclass(frozen=True)
+class Profile:
+    """One loaded profile, named after its file. ``repeat`` is in seconds."""
+
+    name: str
+    topic: str
+    payload: Mapping[str, Message]
+    retain: bool
+    qos: int
+    repeat: float
+
+    @property
+    def needs_archive_id(self) -> bool:
+        return "{archive_id}" in self.topic
+
+    def topic_for(self, sensor: str, archive_id: str | None) -> str | None:
+        """The topic of ``sensor``. None when a topic cannot carry its id or the archive's: a
+        broker drops the client that publishes a wildcard, and a ``/`` would add a level."""
+        values = {"sensor": sensor, "archive_id": archive_id or ""}
+        for name in _placeholders(self.topic):
+            if _NOT_IN_A_LEVEL.search(values[name]):
+                return None
+        topic = _fill(self.topic, values)
+        try:
+            too_long = len(topic.encode()) > _TOPIC_BYTES
+        except UnicodeEncodeError:
+            return None
+        return None if too_long or topic.startswith("$") else topic
+
+    def message_for(self, sensor: str, entry: L1Entry) -> Message:
+        values: dict[str, Any] = {"sensor": sensor}
+        if entry.state == "occupied":
+            values["confidence"] = float(entry.confidence or 0)
+        elif entry.state == "unknown":
+            values["reason"] = entry.reason or ""
+        payload = self.payload[entry.state]
+        return _fill(payload, values) if isinstance(payload, str) else _render(payload, values)
+
+
+def load_profile(name: str) -> Profile:
+    """A shipped profile by its bare name, or the file at a path.
+
+    Raises ``ProfileError`` for a file that cannot be read or that holds anything wrong, so a
+    mistake stops the service at startup rather than going out to a controller.
+    """
+    is_path = "/" in name or name.endswith(".toml")
+    path = Path(name) if is_path else _SHIPPED / f"{name}.toml"
+    try:
+        with path.open("rb") as file:
+            table = tomllib.load(file)
+    except OSError as error:
+        raise ProfileError(f"cannot read the profile {name}: {error}") from error
+    except ValueError as error:  # Includes tomllib's error, and bytes that are not UTF-8.
+        raise ProfileError(f"{path} is not TOML: {error}") from error
+    try:
+        return _parse(path.stem, table)
+    except ValueError as error:
+        raise ProfileError(f"{path}: {error}") from error
+
+
+def _parse(name: str, table: dict[str, Any]) -> Profile:
+    for key in table.keys() - _KEYS:
+        raise ValueError(f"unknown key {key}")
+    for key in _KEYS - table.keys():
+        raise ValueError(f"no {key}")
+    return Profile(
+        name=name,
+        topic=_parse_topic(table["topic"]),
+        payload=_parse_payload(table["payload"]),
+        retain=_parse_retain(table["retain"]),
+        qos=_parse_qos(table["qos"]),
+        repeat=_parse_repeat(table["repeat"]),
+    )
+
+
+def _parse_topic(topic: Any) -> str:
+    if not isinstance(topic, str) or not topic:
+        raise ValueError("topic must be a non-empty string")
+    if _NOT_IN_A_TOPIC.search(topic):
+        raise ValueError(f"topic {topic!r} holds a character no topic may publish to")
+    for name in _placeholders(topic) - _TOPIC_PLACEHOLDERS:
+        raise ValueError(f"topic cannot hold {{{name}}}")
+    return topic
+
+
+def _parse_payload(payload: Any) -> dict[str, Message]:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a table with one entry per state")
+    for key in payload.keys() - set(_STATES):
+        raise ValueError(f"unknown payload {key}")
+    for state in _STATES:
+        if state not in payload:
+            raise ValueError(f"no payload for {state}")
+        message = payload[state]
+        if not isinstance(message, str | dict):
+            raise ValueError(f"payload {state} must be a string or a table")
+        for name in _placeholders(message) - _PAYLOAD_PLACEHOLDERS[state]:
+            raise ValueError(f"payload {state} cannot hold {{{name}}}")
+        if not _is_json(message):
+            raise ValueError(f"payload {state} holds a value JSON does not have")
+    return payload
+
+
+def _parse_retain(retain: Any) -> bool:
+    if not isinstance(retain, bool):
+        raise ValueError("retain must be true or false")
+    return retain
+
+
+def _parse_qos(qos: Any) -> int:
+    if type(qos) is not int or qos not in (0, 1, 2):
+        raise ValueError("qos must be 0, 1 or 2")
+    return qos
+
+
+def _parse_repeat(repeat: Any) -> float:
+    if type(repeat) not in (int, float) or not math.isfinite(repeat) or repeat <= 0:
+        raise ValueError("repeat must be a number of seconds above 0")
+    return repeat
+
+
+def _is_json(message: Message) -> bool:
+    try:
+        encode(message)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _placeholders(value: Any) -> set[str]:
+    """Every placeholder named anywhere in a string, a table or a list."""
+    if isinstance(value, str):
+        return set(_PLACEHOLDER.findall(value))
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        return set().union(*map(_placeholders, value))
+    return set()
+
+
+def _fill(template: str, values: Mapping[str, Any]) -> str:
+    return _PLACEHOLDER.sub(lambda match: str(values[match[1]]), template)
+
+
+def _render(value: Any, values: Mapping[str, Any]) -> Any:
+    """A table with its placeholders filled. One that is a whole string keeps its value's type,
+    so ``"{confidence}"`` is a number in the JSON."""
+    if isinstance(value, str):
+        whole = _PLACEHOLDER.fullmatch(value)
+        return values[whole[1]] if whole else _fill(value, values)
+    if isinstance(value, dict):
+        return {key: _render(item, values) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_render(item, values) for item in value]
+    return value

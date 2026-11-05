@@ -10,6 +10,9 @@ A process that takes one archive and one camera, runs the models where the frame
 **Live contract**:
 The rules in [LIVE.md](LIVE.md).
 
+**Profile**:
+A TOML file that says how L1 goes out over MQTT: its topic, its payloads, and how often it repeats.
+
 ### Owned elsewhere
 
 **Archive**:
