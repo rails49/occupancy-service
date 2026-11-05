@@ -5,6 +5,7 @@ import http.client
 import io
 import json
 import threading
+import time
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -348,3 +349,90 @@ def test_without_the_option_no_patch_is_encoded(
     assert saves == []
     assert "patches" not in answer.fields
     assert answer.parts.keys() == {"json", "frame"}
+
+
+def test_after_returns_as_soon_as_a_newer_frame_exists(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        wait_until_served(service, service.source.show())
+        seen = read_latest(service).fields["frame_id"]
+        newer: list[Frame] = []
+        timer = threading.Timer(0.2, lambda: newer.append(service.source.show()))
+        timer.start()
+        start = time.monotonic()
+        answer = read_latest(service, f"?after={seen}")
+        took = time.monotonic() - start
+        timer.join()
+
+    assert answer.parts["frame"].body == newer[0].jpeg
+    assert answer.fields["frame_id"] != seen
+    assert 0.15 <= took < 0.8
+
+
+def test_after_answers_with_what_it_has_after_about_a_second(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        frame = service.source.show()
+        wait_until_served(service, frame)
+        seen = read_latest(service).fields["frame_id"]
+        start = time.monotonic()
+        answer = read_latest(service, f"?after={seen}&patches=1")
+        took = time.monotonic() - start
+
+    assert 0.9 <= took < 1.5
+    assert answer.fields["frame_id"] == seen
+    assert answer.parts["frame"].body == frame.jpeg
+    assert answer.fields["patches"].keys() == {"s1"}
+
+
+def test_after_an_older_frame_answers_at_once(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        wait_until_served(service, service.source.show())
+        seen = read_latest(service).fields["frame_id"]
+        newest = service.source.show()
+        wait_until_served(service, newest)
+        start = time.monotonic()
+        answer = read_latest(service, f"?after={seen}")
+        took = time.monotonic() - start
+
+    assert answer.parts["frame"].body == newest.jpeg
+    assert took < 0.5
+
+
+@pytest.mark.parametrize("seen", ["from-another-run-1", "garbage", "1" * 5000])
+def test_after_an_id_this_run_did_not_give_answers_at_once(tmp_path: Path, seen: str) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        frame = service.source.show()
+        wait_until_served(service, frame)
+        start = time.monotonic()
+        answer = read_latest(service, f"?after={seen}")
+        took = time.monotonic() - start
+
+    assert answer.parts["frame"].body == frame.jpeg
+    assert took < 0.5
+
+
+def test_after_with_the_camera_lost_is_only_the_json_part_after_about_a_second(
+    tmp_path: Path,
+) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        wait_until_served(service, service.source.show())
+        seen = read_latest(service).fields["frame_id"]
+        service.source.state = "lost"
+        start = time.monotonic()
+        answer = read_latest(service, f"?after={seen}")
+        took = time.monotonic() - start
+
+    assert 0.9 <= took < 1.5
+    assert answer.parts.keys() == {"json"}
+    assert answer.fields["frame_id"] is None
+
+
+def test_after_a_number_too_long_to_read_answers_at_once(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        wait_until_served(service, service.source.show())
+        run = read_latest(service).fields["frame_id"].rpartition("-")[0]
+        start = time.monotonic()
+        answer = read_latest(service, f"?after={run}-{'1' * 5000}")
+        took = time.monotonic() - start
+
+    assert "frame" in answer.parts
+    assert took < 0.5
