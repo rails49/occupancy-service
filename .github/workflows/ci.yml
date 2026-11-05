@@ -25,7 +25,8 @@ jobs:
           version: "0.12.6"
           enable-cache: true
 
-      # The capture test of the real ffmpeg command line is skipped without it.
-      - run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+      # The capture test of the real ffmpeg command line, and the MQTT tests, are skipped without
+      # these.
+      - run: sudo apt-get update && sudo apt-get install --yes ffmpeg mosquitto
 
       - run: bin/test.sh
