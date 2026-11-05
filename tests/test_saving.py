@@ -4,6 +4,7 @@ import hashlib
 import http.client
 import json
 import os
+import socket
 import threading
 import zipfile
 from collections.abc import Iterator
@@ -17,6 +18,7 @@ import r49
 from fake_l1 import FakeScorer, FakeSource, running, wait_for, write_archive
 
 from occupancy_service.l1 import L1Loop, L1Settings
+from occupancy_service.live_check import check
 from occupancy_service.server import LiveServer, ServerSettings
 
 ONE_SENSOR = {"s1": (160.0, 120.0)}
@@ -210,18 +212,18 @@ def test_outside_the_archive_a_write_is_404(service: Service) -> None:
         assert service.send("PUT", path, b"x", If_Match=service.etag())[0] == 404
 
 
-def test_a_body_with_no_content_length_is_411(service: Service) -> None:
-    for path in (PHOTO, MANIFEST):
-        connection = http.client.HTTPConnection("127.0.0.1", service.server.port, timeout=10)
-        connection.request(
-            "PUT",
-            path,
-            iter([b"x"]),
-            {"If-Match": service.etag(), "Transfer-Encoding": "chunked"},
-            encode_chunked=True,
-        )
-        assert connection.getresponse().status == 411
-        connection.close()
+@pytest.mark.parametrize("path", [PHOTO, MANIFEST])
+def test_a_body_with_no_content_length_is_411(service: Service, path: str) -> None:
+    head = f"PUT {path} HTTP/1.1\r\nHost: test\r\nIf-Match: {service.etag()}\r\n"
+    head += "Transfer-Encoding: chunked\r\n\r\n"
+    # Only the head: the answer closes the connection, as the end of such a body cannot be told.
+    with socket.create_connection(("127.0.0.1", service.server.port), timeout=10) as connection:
+        connection.sendall(head.encode())
+        answer = b""
+        while chunk := connection.recv(65536):
+            answer += chunk
+    assert answer.startswith(b"HTTP/1.1 411 ")
+    assert b"\r\nConnection: close\r\n" in answer
     assert (service.folder / "photo.jpg").read_bytes() == b"photo bytes"
 
 
@@ -470,3 +472,20 @@ def test_a_saved_manifest_that_gains_an_id_ends_archive_has_no_id(tmp_path: Path
         result = service.served()
         assert result.l1["s1"].state == "occupied"
         assert result.archive_id == "minted"
+
+
+def test_the_checker_with_save_passes_on_a_folder_and_leaves_it_as_it_was(
+    service: Service,
+) -> None:
+    service.served()
+    before = (service.folder / "manifest.json").read_bytes()
+    base = f"http://127.0.0.1:{service.server.port}/live"
+    assert check(base, timeout=5, save=True) == []
+    assert (service.folder / "manifest.json").read_bytes() == before
+
+
+def test_the_checker_with_save_passes_with_no_way_to_write(unwritable: Path) -> None:
+    with serving(unwritable) as service:
+        service.served()
+        base = f"http://127.0.0.1:{service.server.port}/live"
+        assert check(base, timeout=5, save=True) == []
