@@ -644,6 +644,65 @@ def test_a_reload_tells_a_subscriber_of_a_new_sensor_without_counting_a_change(
         assert loop.stats().changes == {"kept": 1, "new": 0}
 
 
+def test_a_subscription_is_outdated_only_from_the_first_result_under_the_new_manifest(
+    tmp_path: Path,
+) -> None:
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    source = FakeSource()
+    frame = source.show()
+    scorer = FakeScorer({"s1": 0.9, "s2": 0.9})
+
+    with running(L1Loop(L1Settings(archive), source, scorer)) as loop:
+        served(loop, frame)
+        subscription = loop.subscribe()
+        write_archive(tmp_path / "a", {"s1": (160, 120), "s2": (170, 120)})
+        loop.reload()
+        assert not subscription.outdated
+
+        served(loop, source.show())
+
+        assert subscription.outdated
+        assert not loop.subscribe().outdated
+
+
+def test_a_subscription_goes_on_after_it_is_outdated(tmp_path: Path) -> None:
+    """The publisher keeps one subscription across a reload, and reads each new sensor from it."""
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    source = FakeSource()
+    frame = source.show()
+    scorer = FakeScorer({"s1": 0.9, "s2": 0.9})
+
+    with running(L1Loop(L1Settings(archive), source, scorer)) as loop:
+        served(loop, frame)
+        subscription = loop.subscribe()
+        write_archive(tmp_path / "a", {"s1": (160, 120), "s2": (170, 120)})
+        loop.reload()
+        served(loop, source.show())
+
+        assert next_change(subscription) == L1Change("s2", L1Entry("occupied", confidence=0.9))
+
+
+def test_a_sensor_that_stays_gets_no_unknown_from_a_reload(tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "a", {"kept": (160, 120), "old": (170, 120)})
+    source = FakeSource()
+    frame = source.show()
+    scorer = FakeScorer({"kept": 0.9, "old": 0.9, "new": 0.9})
+
+    with running(L1Loop(L1Settings(archive), source, scorer)) as loop:
+        served(loop, frame)
+        subscription = loop.subscribe()
+        write_archive(tmp_path / "a", {"kept": (160, 120), "new": (180, 120)})
+        loop.reload()
+        assert loop.latest().l1["kept"].state == "occupied"
+        served(loop, source.show())
+
+        result = loop.latest()
+        assert set(result.l1) == {"kept", "new"}
+        assert result.l1["kept"].state == "occupied"
+        assert next_change(subscription).sensor == "new"
+        assert subscription.get(0.05) is None
+
+
 def test_stats_hold_the_stage_times_the_camera_and_the_rate(tmp_path: Path) -> None:
     archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
     source = FakeSource()

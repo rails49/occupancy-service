@@ -697,3 +697,27 @@ def test_last_messages_name_only_sensors_in_the_answer(tmp_path: Path) -> None:
     archive = write_archive(tmp_path / "archive", ONE_SENSOR)
     with live(archive, last_messages=lambda: sent) as service:
         assert set(read_latest(service).fields["last_messages"]) == {"s1"}
+
+
+def test_events_clients_are_closed_at_the_first_result_under_a_new_manifest(
+    tmp_path: Path,
+) -> None:
+    folder = folder_archive(tmp_path, {"kept": (160.0, 120.0), "old": (170.0, 120.0)})
+    with live(folder, {"kept": 0.9, "old": 0.9, "new": 0.9}) as service:
+        wait_until_served(service, service.source.show())
+        with event_stream(service) as stream:
+            for _ in range(2):
+                stream.next_event()
+
+            write_archive(folder, {"kept": (160.0, 120.0), "new": (180.0, 120.0)})
+            service.loop.reload()
+            assert stream.is_silent_for(0.2)  # The frame in progress is under the old manifest.
+
+            wait_until_served(service, service.source.show())
+            with pytest.raises(AssertionError, match="the stream ended"):
+                while True:
+                    stream.next_block()
+
+        with event_stream(service) as stream:
+            events = {stream.next_event()["sensor"] for _ in range(2)}
+            assert events == {"kept", "new"}
