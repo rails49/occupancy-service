@@ -18,6 +18,9 @@ The rules in [LIVE.md](LIVE.md).
 **Sensor**:
 `r49`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/r49/blob/main/GLOSSARY.md).
 
+**DPT**:
+`r49`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/r49/blob/main/GLOSSARY.md).
+
 **Detector**:
 `detector`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/detector/blob/main/GLOSSARY.md).
 
