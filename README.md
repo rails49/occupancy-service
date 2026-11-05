@@ -65,7 +65,7 @@ An `events` client that takes over 2 s over one write, or has over 1000 changes 
 
 `occupancy_service.publisher` publishes L1 as its active profiles say, over one `paho-mqtt` connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (30 s), and the timeout of connecting (2 s). To report in `latest`, pass `publisher.last_messages` to `LiveServer`.
 
-Every sensor goes out on each connect and on each repeat, and each change goes out at once. A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
+Every sensor goes out on each connect and on each repeat, and each change goes out at once, except a `clear` that a profile [holds](#holding-clear). A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
 
 ### Profile files
 
@@ -78,10 +78,26 @@ A profile is a TOML file. The `profiles` setting names each by a shipped profile
 | `retain` | `true` or `false`. |
 | `qos` | 0, 1 or 2. |
 | `repeat` | Seconds between sending every sensor, above 0. |
+| `clear_hold_s` | Optional. Seconds to [hold](#holding-clear) a `clear`, from 0. Absent or 0 means no hold. |
 
 In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
 
 A topic that holds `{archive_id}` publishes nothing while the archive has no `id`. A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
+
+### Holding `clear`
+
+One frame the classifier gets wrong would put `clear` on the topic in the middle of a train. Control takes the first `clear` after `occupied` on an entry sensor for the train's tail, so a profile can hold `clear` back.
+
+The hold lowers how often a sensor reads `clear` in the middle of a train and does not rule it out: a `clear` lasting longer than the hold is still published.
+
+With `clear_hold_s` set, a sensor whose last reported state on that profile is not `clear` publishes `clear` only once every result has read `clear` for that long. The time runs from the capture time of the first `clear` frame, and any other result restarts it, including one that came while the broker was gone. `clear` goes out on the first result captured at or after the end of the hold, so with the frames stopped it does not go out: a sensor goes `unknown` first.
+
+- Until then the profile keeps reporting the last state it published, with its `reason` if it has one, on each repeat and each connect. A sensor that was `unknown` stays `unknown`, so a wrong `clear` right after an outage is held too.
+- `occupied` and `unknown` go out at once, as do `unknown` at startup and on a clean stop.
+- The state is kept per sensor and per profile. A sensor with nothing reported yet, because a reload added it or because it was already `clear` when the service connected, says `unknown` with the reason `clear not yet held`. A sensor a reload removes is forgotten.
+- `last_messages` in `latest` shows what the profile sent, so it can differ from L1 for up to the hold. L1 and the rest of the [live contract](LIVE.md) do not change.
+
+The hold makes `clear` later, so control releases a block or transit up to that much later. Where a far sensor is `unknown`, control stops a train on the entry sensor's `clear`, so the train runs on by its speed times the hold: about 10 cm at 104 mm/s and 1 s.
 
 ### The shipped profiles
 
@@ -105,13 +121,14 @@ state = "unknown"
 reason = "{reason}"
 ```
 
-`control`, whose contract is rails49/control#1147. It has no last will, because `layout` has a timer per sensor. That timer wants every sensor at least once a second, so `repeat` leaves room for one to be late:
+`control`, whose contract is rails49/control#1147. It has no last will, because `layout` has a timer per sensor. That timer wants every sensor at least once a second, so `repeat` leaves room for one to be late. It holds `clear` for 1 s, which rails49/occupancy-service#18 measures on real trains:
 
 ```toml
 topic = "tc49/layout/sensor"
 retain = false
 qos = 0
 repeat = 0.9
+clear_hold_s = 1
 
 [payload.occupied]
 addr = "{sensor}"

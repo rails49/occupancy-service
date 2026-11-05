@@ -4,6 +4,8 @@ retain = false
 qos = 0
 # That timer wants every sensor at least once a second, so a repeat a little late must still do.
 repeat = 0.9
+# Control takes a long enough clear on an entry sensor for a train's tail: rails49/control#1165.
+clear_hold_s = 1
 
 [payload.occupied]
 addr = "{sensor}"

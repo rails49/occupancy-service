@@ -64,6 +64,11 @@ def test_only_a_topic_that_names_the_archive_id_needs_one() -> None:
     assert not load_profile("control").needs_archive_id
 
 
+def test_only_the_control_profile_holds_clear() -> None:
+    assert load_profile("control").clear_hold_s == 1
+    assert load_profile("occupancy").clear_hold_s == 0
+
+
 @pytest.mark.parametrize(
     ("line", "seconds"), [("", 0), ("clear_hold_s = 0", 0), ("clear_hold_s = 0.25", 0.25)]
 )

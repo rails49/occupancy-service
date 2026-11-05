@@ -11,7 +11,7 @@ A process that takes one archive and one camera, runs the models where the frame
 The rules in [LIVE.md](LIVE.md).
 
 **Profile**:
-A TOML file that says how L1 goes out over MQTT: its topic, its payloads, and how often it repeats.
+A TOML file that says how L1 goes out over MQTT: its topic, its payloads, how often it repeats, and how long it holds a `clear`.
 
 ### Owned elsewhere
 
