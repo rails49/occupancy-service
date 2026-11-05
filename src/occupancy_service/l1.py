@@ -21,6 +21,14 @@ from classifier.runtime import Engine
 from PIL import Image
 
 from occupancy_service.capture import CaptureStatus, Frame
+from occupancy_service.drift import (
+    Check,
+    DriftCheck,
+    DriftMonitor,
+    DriftReading,
+    DriftUnmeasured,
+    Gray,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -38,6 +46,7 @@ _NO_TRACK = "no track"
 _OUTSIDE_THE_FRAME = "outside the frame"
 _NO_MODEL = "no model"
 _NO_ARCHIVE_ID = "archive has no id"
+_DRIFT = "drift"
 
 
 @dataclass(frozen=True)
@@ -45,6 +54,8 @@ class L1Settings:
     """``archive`` is what ``r49.load`` takes as a path. A sensor farther than ``no_track_limit_g``
     gauges from every track is ``unknown``. ``device`` is as ``classifier.Classifier`` takes it.
     Scoring has stalled after ``stalled_after`` seconds with the camera fine and no new result.
+    The drift check samples every ``drift_every`` seconds. Every sensor is ``unknown`` past
+    ``drift_tolerance_g`` gauges, and None turns the check off.
     """
 
     archive: str | os.PathLike[str]
@@ -53,6 +64,8 @@ class L1Settings:
     device: str = "CPU"
     model: Path = classifier.MODEL
     stalled_after: float = 1.0
+    drift_every: float = 3.0
+    drift_tolerance_g: float | None = 0.5
 
 
 @dataclass(frozen=True)
@@ -70,7 +83,8 @@ class L1Result:
 
     ``frame`` is None with no frame to serve, and then ``scores`` and ``patches`` are empty. A
     sensor with no score or no patch has no entry in them. A patch is height × width × RGB, 8 bits.
-    ``wrong_frame_size`` says ``frame`` is not at ``camera.resolution``.
+    ``wrong_frame_size`` says ``frame`` is not at ``camera.resolution``. ``drift`` is the newest
+    reading, from a frame of its own, and None with the check turned off.
     """
 
     frame: Frame | None
@@ -80,6 +94,7 @@ class L1Result:
     patches: Mapping[str, npt.NDArray[np.uint8]]
     archive_id: str | None
     wrong_frame_size: bool = False
+    drift: DriftReading | DriftUnmeasured | None = None
 
 
 @dataclass(frozen=True)
@@ -279,17 +294,32 @@ class L1Loop:
     """
 
     def __init__(
-        self, settings: L1Settings, source: CaptureSource, scorer: Scorer | None = None
+        self,
+        settings: L1Settings,
+        source: CaptureSource,
+        scorer: Scorer | None = None,
+        make_drift_check: Callable[[Gray], Check] = DriftCheck,
     ) -> None:
         """Reads the manifest, and raises what ``r49.load`` raises when it cannot be read.
 
-        ``scorer`` stands in for the model the settings name.
+        ``scorer`` stands in for the model the settings name, and ``make_drift_check`` for the
+        drift check.
         """
         self._settings = settings
         self._source = source
         self._scorer = scorer if scorer is not None else self._load_scorer()
         self._lock = threading.Lock()
-        self._geometry = self._read_geometry()
+        self._drift = (
+            None
+            if settings.drift_tolerance_g is None
+            else DriftMonitor(
+                settings.drift_every, settings.drift_tolerance_g, source.latest, make_drift_check
+            )
+        )
+        archive = r49.load(settings.archive)
+        self._geometry = self._geometry_from(archive)
+        if self._drift is not None:
+            self._drift.use(archive, self._geometry.dpt)
         self._geometry_in_view = self._geometry
         self._scored: _Scored | None = None
         self._scored_at = 0.0
@@ -312,9 +342,13 @@ class L1Loop:
         ]
         for thread in self._threads:
             thread.start()
+        if self._drift is not None:
+            self._drift.start()
 
     def stop(self) -> None:
         self._stopping.set()
+        if self._drift is not None:
+            self._drift.stop()
         for thread in self._threads:
             thread.join(_JOIN_WAIT)
         self._threads = []
@@ -338,11 +372,15 @@ class L1Loop:
             return subscription
 
     def reload(self) -> None:
-        """Read the manifest again, for the next frame to use. The frame in progress finishes
-        under the old one. When this raises, as ``r49.load`` does, nothing has changed."""
-        geometry = self._read_geometry()
+        """Read the manifest again, for the next frame to use, and rebuild the drift check. The
+        frame in progress finishes under the old one. When this raises, as ``r49.load`` does,
+        nothing has changed."""
+        archive = r49.load(self._settings.archive)
+        geometry = self._geometry_from(archive)
         with self._lock:
             self._geometry = geometry
+            if self._drift is not None:
+                self._drift.use(archive, geometry.dpt)
             self._advance()
 
     def stats(self) -> L1Stats:
@@ -375,9 +413,10 @@ class L1Loop:
             _log.exception("the model did not load")
             return None
 
-    def _read_geometry(self) -> _Geometry:
-        manifest = r49.load(self._settings.archive).manifest
-        return _geometry_of(manifest, self._settings.no_track_limit_g, self._scorer is not None)
+    def _geometry_from(self, archive: r49.R49Archive) -> _Geometry:
+        return _geometry_of(
+            archive.manifest, self._settings.no_track_limit_g, self._scorer is not None
+        )
 
     def _run(self) -> None:
         scored_id: int | None = None
@@ -496,8 +535,11 @@ class L1Loop:
                 id: L1Entry("unknown", reason=geometry.unknown.get(id, live_reason))
                 for id in geometry.sensor_ids
             }
+        drift = self._drift.reading() if self._drift is not None else None
+        if drift is not None and drift.past:
+            l1 = {id: L1Entry("unknown", reason=_DRIFT) for id in geometry.sensor_ids}
         if scored is None:
-            return L1Result(None, l1, {}, threshold, {}, geometry.archive_id)
+            return L1Result(None, l1, {}, threshold, {}, geometry.archive_id, drift=drift)
         return L1Result(
             scored.frame,
             l1,
@@ -506,4 +548,5 @@ class L1Loop:
             scored.patches,
             geometry.archive_id,
             scored.wrong_frame_size,
+            drift,
         )
