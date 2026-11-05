@@ -21,8 +21,12 @@ _PAYLOAD_PLACEHOLDERS = {
     "clear": {"sensor"},
     "unknown": {"sensor", "reason"},
 }
-_NOT_IN_A_TOPIC = re.compile(r"[+#\0]")
-_NOT_IN_A_LEVEL = re.compile(r"[+#/\0]")
+# What a broker calls malformed in a topic: control characters and Unicode non-characters.
+_MALFORMED = "\0-\x1f\x7f-\x9f\ufdd0-\ufdef" + "".join(
+    chr(plane * 0x10000 + low) for plane in range(17) for low in (0xFFFE, 0xFFFF)
+)
+_NOT_IN_A_TOPIC = re.compile(f"[+#{_MALFORMED}]")
+_NOT_IN_A_LEVEL = re.compile(f"[+#/{_MALFORMED}]")
 _TOPIC_BYTES = 65535  # The most a topic can hold in MQTT.
 
 type Message = str | dict[str, Any]
