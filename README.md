@@ -24,3 +24,5 @@ uv run live-check http://localhost:8000/occupancy
 ```sh
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
+
+The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`.
