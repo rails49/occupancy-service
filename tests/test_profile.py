@@ -106,9 +106,40 @@ nested = { list = ["{sensor}", 1] }
     assert profile.message_for("s1", UNKNOWN) == "s1: no frames"
 
 
-@pytest.mark.parametrize("sensor", ["a+b", "a#", "a/b", "a\0b", "\ud800", "x" * 70000], ids=repr)
+@pytest.mark.parametrize(
+    "sensor",
+    [
+        "a+b",
+        "a#",
+        "a/b",
+        "a\0b",
+        "a\tb",
+        "a\x7fb",
+        "a\x9fb",
+        "a\ufdd0b",
+        "a\ufdefb",
+        "a\ufffeb",
+        "a\U0010ffffb",
+        "\ud800",
+        "x" * 70000,
+    ],
+    ids=repr,
+)
 def test_a_topic_cannot_carry_this_sensor_id(sensor: str) -> None:
     assert load_profile("occupancy").topic_for(sensor, "archive-1") is None
+
+
+@pytest.mark.parametrize(
+    "sensor", ["C3.A", "gleis é", "a\xa0b", "a\ufffdb", "a\U0001f682b"], ids=repr
+)
+def test_a_topic_carries_this_sensor_id(sensor: str) -> None:
+    topic = load_profile("occupancy").topic_for(sensor, "archive-1")
+    assert topic == f"occupancy/archive-1/sensor/{sensor}"
+
+
+def test_refuses_a_topic_with_a_character_a_broker_calls_malformed(tmp_path: Path) -> None:
+    with pytest.raises(ProfileError, match="no topic may publish to"):
+        load_profile(str(write(tmp_path, VALID.replace("t/{sensor}", "t\\t/{sensor}"))))
 
 
 def test_a_topic_that_does_not_hold_the_id_carries_any_sensor() -> None:

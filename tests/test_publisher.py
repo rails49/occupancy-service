@@ -394,7 +394,20 @@ def test_a_new_set_of_sensors_and_a_new_id_are_reported_and_a_removed_sensor_is_
     }
 
 
-@pytest.mark.parametrize("bad", ["bad+id", "bad#id", "bad/id"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "bad+id",
+        "bad#id",
+        "bad/id",
+        "bad\tid",
+        "bad\x7fid",
+        "bad\x9fid",
+        "bad\ufdd0id",
+        "bad\uffffid",
+        "bad\U0001ffffid",
+    ],
+)
 def test_a_sensor_id_a_topic_cannot_carry_is_logged_once_and_skipped_there(
     broker: Broker, tmp_path: Path, caplog: pytest.LogCaptureFixture, bad: str
 ) -> None:
@@ -413,7 +426,7 @@ def test_a_sensor_id_a_topic_cannot_carry_is_logged_once_and_skipped_there(
         topics = {message.topic for message in subscriber.messages}
         assert topics == {"own/good", "list"}
     # Still connected throughout: a broker drops a client that publishes to a wildcard.
-    refusals = [record for record in caplog.records if bad in record.getMessage()]
+    refusals = [record for record in caplog.records if repr(bad) in record.getMessage()]
     assert len(refusals) == 1
     assert "fast" in refusals[0].getMessage()
     assert not [record for record in caplog.records if "lost" in record.getMessage()]
