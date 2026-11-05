@@ -4,8 +4,9 @@ import json
 import logging
 import re
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import pytest
 from fake_l1 import FakeScorer, FakeSource, running, wait_for, write_archive
 from mqtt_broker import Broker, Received, Subscriber, mosquitto
 
+from occupancy_service.capture import Frame
 from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings, L1Subscription
 from occupancy_service.live_check import check
 from occupancy_service.profile import ProfileError
@@ -32,10 +34,11 @@ class FakeResults:
     def __init__(self, l1: Mapping[str, L1Entry], archive_id: str | None = "archive-1") -> None:
         self.l1 = dict(l1)
         self.archive_id = archive_id
+        self.frame: Frame | None = None
         self.subscriptions: list[L1Subscription] = []
 
     def latest(self) -> L1Result:
-        return L1Result(None, dict(self.l1), {}, None, {}, self.archive_id)
+        return L1Result(self.frame, dict(self.l1), {}, None, {}, self.archive_id)
 
     def subscribe(self) -> L1Subscription:
         subscription = L1Subscription(dict(self.l1), lambda: None)
@@ -110,6 +113,7 @@ def profile_file(
     occupied: str = '{ state = "occupied", confidence = "{confidence}" }',
     clear: str = '{ state = "clear" }',
     unknown: str = '{ state = "unknown", reason = "{reason}" }',
+    clear_hold_s: float = 0,
 ) -> str:
     """A profile that differs from the own-vocabulary one where a test needs it to."""
     path = folder / f"{name}.toml"
@@ -118,6 +122,7 @@ topic = "{topic}"
 retain = {str(retain).lower()}
 qos = {qos}
 repeat = {repeat}
+clear_hold_s = {clear_hold_s}
 [payload]
 occupied = {occupied}
 clear = {clear}
@@ -128,6 +133,10 @@ unknown = {unknown}
 
 def payload(message: Received) -> Any:
     return json.loads(message.payload)
+
+
+def states(subscriber: Subscriber, topic: str = "own/a") -> list[str]:
+    return [payload(message)["state"] for message in subscriber.on(topic)]
 
 
 def test_the_default_is_the_own_vocabulary_profile_only() -> None:
@@ -501,6 +510,277 @@ def test_the_real_service_reports_what_it_sent_in_latest(broker: Broker, tmp_pat
             assert check(base, timeout=5) == []
         finally:
             server.stop()
+
+
+def test_a_clear_shorter_than_the_hold_never_reaches_the_topic(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, repeat=0.05, clear_hold_s=1)
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        wait_for(lambda: subscriber.on("own/a"))
+        source.show({"a": CLEAR})
+        before = len(subscriber.on("own/a"))
+        time.sleep(0.3)
+        source.show({"a": OCCUPIED})
+        repeats = len(subscriber.on("own/a")) - before
+        time.sleep(1.2)  # Past when the hold would have ended, had it not been restarted.
+        assert repeats >= 2  # The sensor went on saying occupied.
+        assert set(states(subscriber)) == {"occupied"}
+
+
+def test_a_clear_that_stands_for_the_hold_is_published_once_at_the_end_of_it(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=0.4)
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        wait_for(lambda: subscriber.on("own/a"))
+        cleared_at = time.monotonic()
+        source.show({"a": CLEAR})
+        message = subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
+        assert 0.4 <= message.at - cleared_at < 1.5
+        time.sleep(0.3)
+        assert states(subscriber).count("clear") == 1
+
+
+def test_an_occupied_result_during_the_hold_restarts_it(broker: Broker, tmp_path: Path) -> None:
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=0.6)
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        wait_for(lambda: subscriber.on("own/a"))
+        source.show({"a": CLEAR})
+        time.sleep(0.4)
+        source.show({"a": OCCUPIED})
+        time.sleep(0.05)
+        cleared_at = time.monotonic()
+        source.show({"a": CLEAR})
+        message = subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
+        assert message.at - cleared_at >= 0.6
+
+
+def test_the_hold_runs_on_capture_times(broker: Broker, tmp_path: Path) -> None:
+    """A clock the test sets: nothing here takes 30 s, and the clear goes out on the frame that
+    was captured 30 s after the first clear frame, and on no earlier one."""
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=30)
+    source = FakeResults({"a": OCCUPIED})
+    first = datetime(2026, 11, 5, 12, tzinfo=UTC)
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        wait_for(lambda: subscriber.on("own/a"))
+        source.frame = Frame(b"", 1, first)
+        source.show({"a": CLEAR})
+        time.sleep(0.15)
+        source.frame = Frame(b"", 2, first + timedelta(seconds=29.9))
+        time.sleep(0.15)
+        assert set(states(subscriber)) == {"occupied"}
+        source.frame = Frame(b"", 3, first + timedelta(seconds=30))
+        subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
+
+
+def test_unknown_goes_out_at_once_in_a_hold_and_the_clear_after_it_waits_with_its_reason(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, repeat=0.05, clear_hold_s=0.5)
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        wait_for(lambda: subscriber.on("own/a"))
+        source.show({"a": CLEAR})
+        time.sleep(0.1)
+        changed_at = time.monotonic()
+        source.show({"a": NO_FRAMES})
+        unknown = subscriber.wait_for(lambda m: payload(m)["state"] == "unknown")
+        assert unknown.at - changed_at < 0.5
+        time.sleep(0.1)
+        cleared_at = time.monotonic()
+        source.show({"a": CLEAR})
+        clear = subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
+        assert clear.at - cleared_at >= 0.5
+        waiting = [m for m in subscriber.on("own/a") if cleared_at + 0.1 < m.at < clear.at]
+        assert len(waiting) >= 3
+        assert all(payload(m) == {"state": "unknown", "reason": "no frames"} for m in waiting)
+
+
+def test_at_startup_unknown_goes_to_occupied_at_once_and_to_clear_only_after_the_hold(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=0.6)
+    source = FakeResults({"a": NO_FRAMES, "b": NO_FRAMES})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        wait_for(lambda: subscriber.on("own/a") and subscriber.on("own/b"))
+        changed_at = time.monotonic()
+        source.show({"a": OCCUPIED, "b": CLEAR})
+        occupied = subscriber.wait_for(lambda m: payload(m)["state"] == "occupied")
+        assert occupied.topic == "own/a"
+        assert occupied.at - changed_at < 0.5
+        clear = subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
+        assert clear.topic == "own/b"
+        assert clear.at - changed_at >= 0.6
+    said = states(subscriber, "own/b")
+    assert set(said[: said.index("clear")]) == {"unknown"}
+
+
+def test_a_sensor_already_clear_at_connect_says_unknown_until_the_hold_has_passed(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=0.3)
+    source = FakeResults({"a": CLEAR})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        first = subscriber.wait_for(lambda m: m.topic == "own/a")
+        assert payload(first) == {"state": "unknown", "reason": "clear not yet held"}
+        clear = subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
+        assert clear.at - first.at >= 0.25
+
+
+def test_a_reconnect_during_a_hold_reports_the_last_published_state(
+    broker: Broker, tmp_path: Path
+) -> None:
+    """Retained, with a repeat too long to help: a late subscriber sees what the new connection
+    sent, whichever of the two got to the broker first."""
+    path = profile_file(tmp_path, retain=True, repeat=60, clear_hold_s=60)
+    source = FakeResults({"a": OCCUPIED})
+    with publishing(source, settings_for(broker, path)):
+        with subscribed(broker) as before:
+            wait_for(lambda: before.on("own/a"))
+        source.show({"a": CLEAR})
+        time.sleep(0.1)
+        broker.stop()
+        broker.start()
+        with subscribed(broker) as after:
+            wait_for(lambda: after.on("own/a"))
+            assert states(after) == ["occupied"]
+
+
+def test_a_break_in_clear_while_the_broker_is_gone_restarts_the_hold(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=0.5)
+    source = FakeResults({"a": OCCUPIED})
+    with publishing(source, settings_for(broker, path)):
+        with subscribed(broker) as before:
+            wait_for(lambda: before.on("own/a"))
+        source.show({"a": CLEAR})
+        time.sleep(0.1)
+        broker.stop()
+        source.show({"a": OCCUPIED})
+        time.sleep(0.6)  # The hold that began before the break would have ended by now.
+        source.show({"a": CLEAR})
+        broker.start()
+        with subscribed(broker) as after:
+            first = after.wait_for(lambda m: m.topic == "own/a")
+            assert payload(first)["state"] == "occupied"
+            clear = after.wait_for(lambda m: payload(m)["state"] == "clear")
+            assert clear.at - first.at >= 0.4
+
+
+def test_two_profiles_at_once_hold_apart_and_last_messages_show_what_each_sent(
+    broker: Broker, tmp_path: Path
+) -> None:
+    held = profile_file(tmp_path, name="held", topic="held/{sensor}", repeat=0.05, clear_hold_s=60)
+    plain = profile_file(tmp_path, name="plain", topic="plain/{sensor}", repeat=0.05)
+    source = FakeResults({"a": OCCUPIED})
+    settings = settings_for(broker, held, plain)
+    with subscribed(broker) as subscriber, publishing(source, settings) as publisher:
+        wait_for(lambda: subscriber.on("held/a") and subscriber.on("plain/a"))
+        source.show({"a": CLEAR})
+        subscriber.wait_for(lambda m: m.topic == "plain/a" and payload(m)["state"] == "clear")
+        clear_at = time.monotonic()
+        wait_for(lambda: subscriber.on("held/a")[-1].at > clear_at)
+        assert set(states(subscriber, "held/a")) == {"occupied"}
+        sent = publisher.last_messages()["a"]
+        assert sent["held"].message == {"state": "occupied", "confidence": 0.93}
+        assert sent["plain"].message == {"state": "clear"}
+
+
+def test_a_hold_leaves_l1_and_its_change_count_alone(broker: Broker, tmp_path: Path) -> None:
+    """On the real loop, with frames going on through the hold."""
+    archive = write_archive(tmp_path / "archive", {"s1": (160.0, 120.0)})
+    source = FakeSource()
+    scores = {"s1": 0.9}
+    loop = L1Loop(L1Settings(archive), source, FakeScorer(scores))
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=0.4)
+
+    def next_frame_until(done: Callable[[], Any]) -> None:
+        def seen() -> Any:
+            source.show()
+            time.sleep(0.02)
+            return done()
+
+        wait_for(seen)
+
+    with (
+        running(loop),
+        subscribed(broker) as subscriber,
+        publishing(loop, settings_for(broker, path)),
+    ):
+        next_frame_until(lambda: "occupied" in states(subscriber, "own/s1"))
+        scores["s1"] = 0.1
+        next_frame_until(lambda: loop.latest().l1["s1"] == CLEAR)
+        cleared_at = time.monotonic()
+        assert loop.stats().changes["s1"] == 2  # From unknown to occupied, then to clear.
+        assert "clear" not in states(subscriber, "own/s1")
+        next_frame_until(lambda: "clear" in states(subscriber, "own/s1"))
+        assert time.monotonic() - cleared_at >= 0.3
+        assert loop.stats().changes["s1"] == 2
+
+
+def test_with_a_hold_every_other_change_still_goes_out_at_once(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=0.6)
+    source = FakeResults({"a": CLEAR})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
+        changed_at = time.monotonic()
+        source.show({"a": OCCUPIED})
+        message = subscriber.wait_for(lambda m: payload(m)["state"] == "occupied")
+        assert message.at - changed_at < 0.5
+        changed_at = time.monotonic()
+        source.show({"a": NO_FRAMES})
+        message = subscriber.wait_for(lambda m: payload(m).get("reason") == "no frames")
+        assert message.at - changed_at < 0.5
+        changed_at = time.monotonic()
+        source.show({"a": L1Entry("unknown", reason="scoring stalled")})
+        message = subscriber.wait_for(lambda m: payload(m).get("reason") == "scoring stalled")
+        assert message.at - changed_at < 0.5
+
+
+def test_with_no_hold_clear_goes_out_at_once(broker: Broker, tmp_path: Path) -> None:
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=0)
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        wait_for(lambda: subscriber.on("own/a"))
+        changed_at = time.monotonic()
+        source.show({"a": CLEAR})
+        message = subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
+        assert message.at - changed_at < 0.5
+
+
+def test_a_sensor_a_reload_adds_starts_unknown_and_one_it_removes_is_forgotten(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, repeat=0.05, clear_hold_s=60)
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)) as sent:
+        wait_for(lambda: subscriber.on("own/a"))
+        source.show({"b": CLEAR})
+        message = subscriber.wait_for(lambda m: m.topic == "own/b")
+        assert payload(message) == {"state": "unknown", "reason": "clear not yet held"}
+        wait_for(lambda: "a" not in sent.last_messages())
+        source.show({"a": CLEAR, "b": CLEAR})  # Back, as new: not with the occupied it last said.
+        unknown = subscriber.wait_for(lambda m: m.topic == "own/a" and "reason" in payload(m))
+        assert payload(unknown)["reason"] == "clear not yet held"
+
+
+def test_a_clean_stop_during_a_hold_sends_unknown(broker: Broker, tmp_path: Path) -> None:
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=60)
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber:
+        with publishing(source, settings_for(broker, path)):
+            wait_for(lambda: subscriber.on("own/a"))
+            source.show({"a": CLEAR})
+            time.sleep(0.1)
+        wait_for(lambda: payload(subscriber.on("own/a")[-1]).get("reason") == "service stopped")
+        assert "clear" not in states(subscriber)
 
 
 def test_no_python_file_under_src_names_the_controller() -> None:
