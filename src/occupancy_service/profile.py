@@ -13,6 +13,7 @@ from occupancy_service.l1 import L1Entry
 
 _SHIPPED = Path(__file__).parent / "profiles"
 _KEYS = {"topic", "payload", "retain", "qos", "repeat"}
+_OPTIONAL_KEYS = {"clear_hold_s"}
 _STATES = ("occupied", "clear", "unknown")
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _TOPIC_PLACEHOLDERS = {"archive_id", "sensor"}
@@ -45,7 +46,8 @@ def encode(message: Message) -> bytes:
 
 @dataclass(frozen=True)
 class Profile:
-    """One loaded profile, named after its file. ``repeat`` is in seconds."""
+    """One loaded profile, named after its file. ``repeat`` and ``clear_hold_s`` are in seconds,
+    and a ``clear_hold_s`` of 0 means no hold."""
 
     name: str
     topic: str
@@ -53,6 +55,7 @@ class Profile:
     retain: bool
     qos: int
     repeat: float
+    clear_hold_s: float = 0
 
     @property
     def needs_archive_id(self) -> bool:
@@ -104,7 +107,7 @@ def load_profile(name: str) -> Profile:
 
 
 def _parse(name: str, table: dict[str, Any]) -> Profile:
-    for key in table.keys() - _KEYS:
+    for key in table.keys() - _KEYS - _OPTIONAL_KEYS:
         raise ValueError(f"unknown key {key}")
     for key in _KEYS - table.keys():
         raise ValueError(f"no {key}")
@@ -115,6 +118,7 @@ def _parse(name: str, table: dict[str, Any]) -> Profile:
         retain=_parse_retain(table["retain"]),
         qos=_parse_qos(table["qos"]),
         repeat=_parse_repeat(table["repeat"]),
+        clear_hold_s=_parse_clear_hold(table.get("clear_hold_s", 0)),
     )
 
 
@@ -162,6 +166,12 @@ def _parse_repeat(repeat: Any) -> float:
     if type(repeat) not in (int, float) or not math.isfinite(repeat) or repeat <= 0:
         raise ValueError("repeat must be a number of seconds above 0")
     return repeat
+
+
+def _parse_clear_hold(seconds: Any) -> float:
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("clear_hold_s must be a number of seconds from 0")
+    return seconds
 
 
 def _is_json(message: Message) -> bool:
