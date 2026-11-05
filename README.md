@@ -21,7 +21,9 @@ uv run live-check http://localhost:8000/live
 
 ## L1
 
-`occupancy_service.l1` turns the newest frame into L1. It reads the archive's manifest and no image. `L1Settings` holds the archive's path, the distance from a track past which a sensor has no track (0.3 G), and the engine, device and model, which default to onnxruntime and the model in the `rails49-classifier` wheel.
+`occupancy_service.l1` turns the newest frame into L1. It reads the archive's manifest and no image. `L1Settings` holds the archive's path, the distance from a track past which a sensor has no track (0.3 G), the time until `scoring stalled` (`stalled_after`, 1 s), and the engine, device and model, which default to onnxruntime and the model in the `rails49-classifier` wheel. `CaptureSettings` holds the time until the camera is `lost` (`lost_after`, 1 s).
+
+The `openvino` engine needs the `openvino` extra (`uv sync --extra openvino`). The dev group holds it too, so the tests run it on the CPU. onnxruntime runs only on the CPU, and any other device reads `no model`.
 
 At or above the model's threshold a sensor is `occupied`, and below it `clear`. There is no smoothing across frames. A sensor is `unknown`, with one of these reasons, the first that applies:
 

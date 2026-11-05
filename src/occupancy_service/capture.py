@@ -15,7 +15,6 @@ import r49
 
 _log = logging.getLogger(__name__)
 
-_LOST_AFTER = 1.0  # Seconds with no new frame until the camera is lost.
 _RETRY_WAIT = 1.0  # Seconds between the end of one ffmpeg and the start of the next.
 _KILL_WAIT = 1.0  # Seconds to wait for a killed ffmpeg, which may be stuck in a USB call.
 _RATE_WINDOW = 2.0  # Seconds of arrivals the capture rate is measured over.
@@ -26,13 +25,15 @@ _SOI, _EOI, _SOS = 0xD8, 0xD9, 0xDA
 
 @dataclass(frozen=True)
 class CaptureSettings:
-    """``resolution`` is the manifest's ``camera.resolution``."""
+    """``resolution`` is the manifest's ``camera.resolution``. The camera is ``lost`` after
+    ``lost_after`` seconds with no new frame."""
 
     resolution: r49.Resolution
     device: str = "/dev/video0"
     frame_rate: float = 20
     hang_limit: float = 3
     ffmpeg: str = "ffmpeg"
+    lost_after: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -114,7 +115,7 @@ class Capture:
         if last is None:
             return CaptureStatus("lost", None, rate)
         age = now - last
-        return CaptureStatus("ok" if age <= _LOST_AFTER else "lost", age * 1000, rate)
+        return CaptureStatus("ok" if age <= self._settings.lost_after else "lost", age * 1000, rate)
 
     def _run(self) -> None:
         while not self._stopping.is_set():

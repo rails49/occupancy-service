@@ -13,6 +13,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import r49
+from classifier.runtime import Engine
 from fake_ffmpeg import HEIGHT as FAKE_HEIGHT
 from fake_ffmpeg import WIDTH as FAKE_WIDTH
 from fake_ffmpeg import install, noise_jpeg, stream
@@ -46,12 +47,13 @@ def reasons(result: L1Result) -> dict[str, str | None]:
     return {id: entry.reason for id, entry in result.l1.items()}
 
 
-def test_the_packaged_model_turns_a_frame_into_l1(tmp_path: Path) -> None:
+@pytest.mark.parametrize("engine", ["onnxruntime", "openvino"])
+def test_the_packaged_model_turns_a_frame_into_l1(tmp_path: Path, engine: Engine) -> None:
     archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
     source = FakeSource()
     frame = source.show()
 
-    with running(L1Loop(L1Settings(archive), source)) as loop:
+    with running(L1Loop(L1Settings(archive, engine=engine), source)) as loop:
         result = wait_for(lambda: (r := loop.latest()).frame and r)
 
     assert result.frame == frame
@@ -204,6 +206,35 @@ def test_scoring_stalled_with_a_scorer_that_hangs_while_frames_keep_arriving(
     assert reasons(result) == {"s1": "scoring stalled"}
     assert result.frame == frame  # It still comes from the newest result.
     assert 0.5 < waited < 3  # About 1 s, with room for a busy machine.
+
+
+def test_the_time_until_scoring_stalled_is_a_setting(tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    source = FakeSource()
+    frame = source.show()
+    release = threading.Event()
+    scorer = FakeScorer({"s1": 0.9})
+    settings = L1Settings(archive, stalled_after=0.2)
+
+    try:
+        with running(L1Loop(settings, source, scorer)) as loop:
+            served(loop, frame)
+            scorer.gate = release
+            before = time.monotonic()
+
+            def stalled() -> L1Result | None:
+                source.show()
+                time.sleep(0.01)
+                result = loop.latest()
+                return result if result.l1["s1"].state == "unknown" else None
+
+            result = wait_for(stalled)
+            waited = time.monotonic() - before
+    finally:
+        release.set()
+
+    assert reasons(result) == {"s1": "scoring stalled"}
+    assert waited < 0.8
 
 
 def test_scoring_stalled_with_a_scorer_that_raises(tmp_path: Path) -> None:
