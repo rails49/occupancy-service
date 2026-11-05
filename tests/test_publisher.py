@@ -173,7 +173,8 @@ def test_own_vocabulary_topics_and_payloads(broker: Broker) -> None:
 def test_the_control_profile_has_exactly_its_keys_and_is_not_retained(broker: Broker) -> None:
     source = FakeResults({"a": OCCUPIED, "b": CLEAR, "c": NO_FRAMES})
     with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "control")):
-        wait_for(lambda: len(subscriber.on(CONTROL)) >= 3)
+        # The profile's hold: b's clear comes about 1 s after the first message.
+        subscriber.wait_for(lambda m: payload(m) == {"addr": "b", "occupancy": "clear"})
         by_addr = {payload(message)["addr"]: payload(message) for message in subscriber.messages}
         assert by_addr == {
             "a": {"addr": "a", "occupancy": "occupied"},
