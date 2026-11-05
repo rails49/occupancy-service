@@ -60,7 +60,7 @@ An `events` client that takes over 2 s over one write, or has over 1000 changes 
 
 ## MQTT
 
-`occupancy_service.publisher` publishes L1 as its active profiles say, over one connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (30 s), and the timeout of connecting and of a write (2 s). To report in `latest`, pass `publisher.last_messages` to `LiveServer`.
+`occupancy_service.publisher` publishes L1 as its active profiles say, over one `paho-mqtt` connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (30 s), and the timeout of connecting (2 s). To report in `latest`, pass `publisher.last_messages` to `LiveServer`.
 
 Every sensor goes out on each connect and on each repeat, and each change goes out at once. A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
 
@@ -125,8 +125,6 @@ reason = "{reason}"
 ```
 
 A string payload is written the same way, as `clear = "OFF {sensor}"` under `[payload]`.
-
-`mqtt.py` is a small client, not a library: it publishes, and does not retransmit, because the next connection sends every sensor again.
 
 ## Test
 

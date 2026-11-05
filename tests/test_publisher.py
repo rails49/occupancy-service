@@ -303,7 +303,7 @@ def test_a_restarted_broker_gets_every_sensor_with_no_restart_here(
     sent, whichever of the two got to the broker first."""
     path = profile_file(tmp_path, retain=True, repeat=60)
     source = FakeResults({"a": CLEAR, "b": CLEAR})
-    settings = settings_for(broker, path, retry_every=0.05)
+    settings = settings_for(broker, path)
     with publishing(source, settings):
         with subscribed(broker) as before:
             wait_for(lambda: before.on("own/a") and before.on("own/b"))
@@ -319,7 +319,7 @@ def test_a_restarted_broker_gets_every_sensor_with_no_restart_here(
 def test_it_connects_to_a_broker_that_starts_later(broker: Broker) -> None:
     broker.stop()
     source = FakeResults({"a": CLEAR})
-    with publishing(source, settings_for(broker, retry_every=0.05)):
+    with publishing(source, settings_for(broker)):
         time.sleep(0.2)
         broker.start()
         with subscribed(broker) as subscriber:
