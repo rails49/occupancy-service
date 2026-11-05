@@ -15,7 +15,7 @@ from paho.mqtt.enums import CallbackAPIVersion, MQTTErrorCode
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
 
-from occupancy_service.l1 import L1Entry, L1Result, L1Subscription
+from occupancy_service.l1 import L1Change, L1Entry, L1Result, L1Subscription
 from occupancy_service.profile import Message, Profile, ProfileError, encode, load_profile
 
 _log = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ _log = logging.getLogger(__name__)
 _WAKE = 0.05  # Seconds at most between looks at the broker and at stop().
 _JOIN_WAIT = 10.0  # Seconds stop() waits: connecting has its own timeout.
 _STOPPED = L1Entry("unknown", reason="service stopped")
+_NOT_YET_HELD = L1Entry("unknown", reason="clear not yet held")  # A sensor with nothing sent yet.
 
 
 @dataclass(frozen=True)
@@ -58,12 +59,54 @@ class ResultSource(Protocol):
     def subscribe(self) -> L1Subscription: ...
 
 
+@dataclass
+class _HeldSensor:
+    """The last entry a profile reported for a sensor, and the capture time of the first ``clear``
+    frame since, while that entry is not ``clear``."""
+
+    reported: L1Entry
+    clear_since: datetime | None = None
+
+
+class _ClearHold:
+    """Keeps one profile's sensors from going to ``clear`` until ``clear`` has stood for
+    ``seconds``. The README documents the rules."""
+
+    def __init__(self, seconds: float) -> None:
+        self._seconds = seconds
+        self._sensors: dict[str, _HeldSensor] = {}
+
+    def report(self, sensor: str, entry: L1Entry, captured_at: datetime) -> L1Entry:
+        """What to say for ``sensor`` now that it reads ``entry``. This never ends a hold."""
+        held = self._sensors.setdefault(sensor, _HeldSensor(_NOT_YET_HELD))
+        if entry.state != "clear":
+            held.reported, held.clear_since = entry, None
+        elif held.reported.state != "clear" and held.clear_since is None:
+            held.clear_since = captured_at
+        return held.reported
+
+    def release(self, sensor: str, entry: L1Entry, captured_at: datetime) -> bool:
+        """Whether a result captured at ``captured_at`` ends the hold on ``sensor``. The caller has
+        passed every change up to that result to ``report``, or a break could go unseen."""
+        held = self._sensors.get(sensor)
+        if held is None or held.clear_since is None or entry.state != "clear":
+            return False
+        if (captured_at - held.clear_since).total_seconds() < self._seconds:
+            return False
+        held.reported, held.clear_since = entry, None
+        return True
+
+    def forget_all_but(self, sensors: Mapping[str, L1Entry]) -> None:
+        self._sensors = {id: held for id, held in self._sensors.items() if id in sensors}
+
+
 class Publisher:
     """One connection for all profiles. paho's thread keeps it up and reconnects, and this class's
     own thread does the sending.
 
     It keeps no result: each message comes from ``latest()``, or from a change it has just been
-    told of, so a reload needs no restart and a repeat is as fresh as ``latest()``.
+    told of, so a reload needs no restart and a repeat is as fresh as ``latest()``. The one thing
+    it keeps, for a profile with a hold, is what that profile last reported.
     """
 
     def __init__(self, settings: PublisherSettings, source: ResultSource) -> None:
@@ -74,6 +117,11 @@ class Publisher:
         names = [profile.name for profile in self._profiles]
         for name in {name for name in names if names.count(name) > 1}:
             raise ProfileError(f"two active profiles are named {name}")
+        self._holds = {
+            profile.name: _ClearHold(profile.clear_hold_s)
+            for profile in self._profiles
+            if profile.clear_hold_s > 0
+        }
         self._lock = threading.Lock()
         self._last: dict[str, dict[str, LastMessage]] = {}
         self._refused: set[tuple[str, str]] = set()
@@ -118,7 +166,7 @@ class Publisher:
             while not self._stopping.is_set():
                 if self._connected.wait(_WAKE):
                     self._connected.clear()
-                    _discard(subscription)  # The connection starts by sending every sensor.
+                    self._note_missed_changes(subscription)
                     self._serve(client, subscription)
             if client.is_connected():
                 self._send_all(client, self._profiles, stopping=True)
@@ -176,10 +224,8 @@ class Publisher:
             next_due = min(due.values(), default=math.inf)
             change = subscription.get(max(min(_WAKE, next_due - time.monotonic()), 0))
             if change is not None:
-                result = self._source.latest()
-                if change.sensor in result.l1:  # Otherwise a reload has just removed it.
-                    for profile in self._profiles:
-                        self._send(client, profile, change.sensor, change.entry, result.archive_id)
+                self._send_change(client, change)
+            self._end_holds(client, subscription)
             now = time.monotonic()
             repeating = [profile for profile in self._profiles if due[profile.name] <= now]
             if repeating:
@@ -189,6 +235,38 @@ class Publisher:
                 next_at = due[profile.name] + profile.repeat
                 due[profile.name] = next_at if next_at > now else now + profile.repeat
 
+    def _note_missed_changes(self, subscription: L1Subscription) -> None:
+        """The connection starts by sending every sensor, so what changed without one is not sent.
+        A hold still has to see it, as a break in ``clear`` restarts the hold."""
+        while (change := subscription.get(0)) is not None:
+            captured_at = _captured_at(self._source.latest())
+            for hold in self._holds.values():
+                hold.report(change.sensor, change.entry, captured_at)
+
+    def _send_change(self, client: paho.Client, change: L1Change) -> None:
+        result = self._source.latest()
+        if change.sensor in result.l1:  # Otherwise a reload has just removed it.
+            for profile in self._profiles:
+                self._report(client, profile, change.sensor, change.entry, result)
+
+    def _end_holds(self, client: paho.Client, subscription: L1Subscription) -> None:
+        """Sends ``clear`` for each sensor whose hold the newest result ends."""
+        if not self._holds:
+            return
+        result = self._source.latest()
+        self._forget_all_but(result.l1)
+        # latest() queues each change up to its result before it returns, so after this no break
+        # in ``clear`` up to that result is still unread.
+        while (change := subscription.get(0)) is not None:
+            self._send_change(client, change)
+        captured_at = _captured_at(result)
+        for profile in self._profiles:
+            hold = self._holds.get(profile.name)
+            if hold is not None:
+                for sensor, entry in result.l1.items():
+                    if hold.release(sensor, entry, captured_at):
+                        self._send(client, profile, sensor, entry, result.archive_id)
+
     def _send_all(
         self, client: paho.Client, profiles: list[Profile], stopping: bool = False
     ) -> None:
@@ -197,8 +275,21 @@ class Publisher:
         self._forget_all_but(result.l1)
         for profile in profiles:
             for sensor, entry in result.l1.items():
-                sent = _STOPPED if stopping else entry
-                self._send(client, profile, sensor, sent, result.archive_id)
+                self._report(client, profile, sensor, _STOPPED if stopping else entry, result)
+
+    def _report(
+        self,
+        client: paho.Client,
+        profile: Profile,
+        sensor: str,
+        entry: L1Entry,
+        result: L1Result,
+    ) -> None:
+        """Sends ``entry``, or on a profile holding this sensor what that profile last reported."""
+        hold = self._holds.get(profile.name)
+        if hold is not None:
+            entry = hold.report(sensor, entry, _captured_at(result))
+        self._send(client, profile, sensor, entry, result.archive_id)
 
     def _send(
         self,
@@ -231,8 +322,10 @@ class Publisher:
     def _forget_all_but(self, sensors: Mapping[str, L1Entry]) -> None:
         with self._lock:
             self._last = {id: messages for id, messages in self._last.items() if id in sensors}
+        for hold in self._holds.values():
+            hold.forget_all_but(sensors)
 
 
-def _discard(subscription: L1Subscription) -> None:
-    while subscription.get(0) is not None:
-        pass
+def _captured_at(result: L1Result) -> datetime:
+    """When the frame of ``result`` was captured. A result with no frame stands for now."""
+    return result.frame.arrived_at if result.frame is not None else datetime.now(UTC)
