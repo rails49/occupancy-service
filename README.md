@@ -13,7 +13,40 @@ bin/install-hooks.sh    # refuse commits on main, and run the gate before each p
 
 ## Run
 
-The process that runs it all is not written yet: `Capture`, `L1Loop`, `LiveServer` and `Publisher` are started by the caller. `live-check` tests a running implementation against the contract:
+```sh
+uv run python -m occupancy_service --archive <path> --camera /dev/video0 --broker <host>:<port>
+```
+
+This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stderr. The camera's size is the manifest's `camera.resolution`, read once at the start, so a reload that changes it needs a restart.
+
+| Flag | Goes to | Default |
+| :--- | :--- | :--- |
+| `--archive` | `L1Settings.archive`, and `LiveServer`'s archive | Required |
+| `--camera` | `CaptureSettings.device` | Required |
+| `--broker <host>:<port>` | `PublisherSettings.host`, `port` | Required |
+| `--profile`, repeated | `PublisherSettings.profiles` | `occupancy` |
+| `--address` | `ServerSettings.address` | `127.0.0.1` |
+| `--port` | `ServerSettings.port` | `8000` |
+| `--engine` | `L1Settings.engine` | `onnxruntime` |
+| `--device` | `L1Settings.device` | `CPU` |
+| `--frame-rate` | `CaptureSettings.frame_rate` | `20` |
+
+Each of these refuses the process: it exits 1 with one line on stderr, with no `ffmpeg` started and no port left bound. A flag that argparse refuses, such as a malformed `--broker`, exits 2.
+
+- An archive that cannot be read, which is anything `r49.load` raises. Without a manifest the service has no sensors, no resolution and no archive id, so it has nothing to do, and it serves nothing. `control`'s timer per sensor reports the silence, and a restart policy picks up a repaired archive with no person restarting anything. A running service that loses its archive keeps its geometry.
+- A profile that raises `ProfileError`.
+- An address that cannot be bound.
+
+None of these refuses it. The process starts, and the parts report and recover as they do at any other time:
+
+- A camera that is absent: sensors read `no frames`.
+- A broker that is absent: it is retried, and `latest` answers meanwhile.
+- A model that does not load: sensors read `no model`.
+- A manifest with no `id`: sensors read `archive has no id`.
+
+SIGTERM and SIGINT both stop the parts and exit 0. `service stopped` goes out for every sensor while a broker is connected, and no `ffmpeg` is left behind.
+
+`live-check` tests a running implementation against the contract:
 
 ```sh
 uv run live-check http://localhost:8000/live
@@ -85,7 +118,7 @@ An `events` client that takes over 2 s over one write, or has over 1000 changes 
 
 ## MQTT
 
-`occupancy_service.publisher` publishes L1 as its active profiles say, over one `paho-mqtt` connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (30 s), and the timeout of connecting (2 s). To report in `latest`, pass `publisher.last_messages` to `LiveServer`.
+`occupancy_service.publisher` publishes L1 as its active profiles say, over one `paho-mqtt` connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (30 s), and the timeout of connecting (2 s). The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them.
 
 Every sensor goes out on each connect and on each repeat, and each change goes out at once, except a `clear` that a profile [holds](#holding-clear). A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
 
@@ -174,4 +207,4 @@ A string payload is written the same way, as `clear = "OFF {sensor}"` under `[pa
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
 
-The L1 tests use a fake capture source and the packaged model, on the CPU. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both.
+The L1 tests use a fake capture source and the packaged model, on the CPU. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.
