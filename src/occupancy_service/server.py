@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import secrets
+import socket
 import threading
 import time
 from collections.abc import Mapping
@@ -27,19 +28,30 @@ _log = logging.getLogger(__name__)
 
 _BASE = "/live"
 _LATEST = f"{_BASE}/latest"
+_EVENTS = f"{_BASE}/events"
 _ARCHIVE = f"{_BASE}/archive/"
 _MANIFEST = "manifest.json"
 _AFTER_WAIT = 1.0  # Seconds ``after`` waits for a newer frame.
 _AFTER_POLL = 0.01  # Seconds between looks for one, as often as the loop looks for a new frame.
+_EVENTS_BUFFER = 1 << 16  # Bytes the system holds for an ``events`` client that is not reading.
+_EVENTS_WAKE = 0.1  # Seconds an ``events`` stream waits before it looks at stop() again.
 _IDLE_TIMEOUT = 30.0  # Seconds an idle connection stays open, and any one write may take.
 
 
 @dataclass(frozen=True)
 class ServerSettings:
-    """Where to listen. Port 0 takes a free port."""
+    """Where to listen, and how an ``events`` stream behaves. Port 0 takes a free port.
+
+    A comment line goes out every ``comment_every`` seconds. A client that takes more than
+    ``write_timeout`` seconds to take one event, or has more than ``max_backlog`` changes waiting
+    for it, has fallen behind, and is dropped.
+    """
 
     address: str = "127.0.0.1"
     port: int = 8000
+    comment_every: float = 15
+    write_timeout: float = 2
+    max_backlog: int = 1000
 
 
 class LiveServer:
@@ -103,6 +115,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if path == _LATEST:
                 self._latest(parse_qs(query))
+            elif path == _EVENTS:
+                self._events()
             elif path.startswith(_ARCHIVE):
                 self._archive_file(unquote(path.removeprefix(_ARCHIVE)))
             else:
@@ -146,6 +160,37 @@ class _Handler(BaseHTTPRequestHandler):
             if after is None or newer or time.monotonic() >= deadline:
                 return result, stats, frame
             self.live.stopping.wait(_AFTER_POLL)
+
+    def _events(self) -> None:
+        """Every sensor's state, then each change. Only this client's thread ever waits on it. An
+        ``OSError`` from a write drops the client, which reconnects to the full state."""
+        settings = self.live.settings
+        self.close_connection = True
+        # A small buffer, so that a client that stops reading is found soon.
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _EVENTS_BUFFER)
+        self.connection.settimeout(settings.write_timeout)
+        subscription = self.live.loop.subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for id, entry in subscription.state.items():
+                self.wfile.write(_event(id, entry))
+            comment_at = time.monotonic() + settings.comment_every
+            while not self.live.stopping.is_set():
+                if subscription.queue.qsize() > settings.max_backlog:
+                    return
+                wait = min(_EVENTS_WAKE, max(comment_at - time.monotonic(), 0))
+                change = subscription.get(wait)
+                if change is not None:
+                    self.wfile.write(_event(change.sensor, change.entry))
+                if time.monotonic() >= comment_at:
+                    self.wfile.write(b": still here\n\n")
+                    comment_at += settings.comment_every
+        finally:
+            subscription.close()
 
     def _archive_file(self, name: str) -> None:
         # A folder or a zip would not refuse every dot path by itself, and this is a direct
@@ -224,6 +269,10 @@ def _camera(status: CaptureStatus) -> dict[str, Any]:
     if status.frame_age_ms is not None:
         camera["frame_age_ms"] = status.frame_age_ms
     return camera
+
+
+def _event(sensor: str, entry: L1Entry) -> bytes:
+    return b"data: " + _json({"sensor": sensor, **_entry(entry)}) + b"\n\n"
 
 
 def _json(value: Any) -> bytes:
