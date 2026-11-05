@@ -13,10 +13,10 @@ bin/install-hooks.sh    # refuse commits on main, and run the gate before each p
 
 ## Run
 
-The service itself is not written yet. `live-check` tests a running implementation against the contract:
+The process that runs it all is not written yet: `Capture`, `L1Loop` and `LiveServer` are started by the caller. `live-check` tests a running implementation against the contract:
 
 ```sh
-uv run live-check http://localhost:8000/occupancy
+uv run live-check http://localhost:8000/live
 ```
 
 ## L1
@@ -38,10 +38,28 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 
 **The turnout limit:** a sensor near a turnout is scored like any other, but the training data leaves such positions out, so the classifier's accuracy there is not known. The service does not detect these sensors, and reports nothing special for them.
 
+## HTTP
+
+`occupancy_service.server` serves [LIVE.md](LIVE.md) under a fixed `/live`, with a thread per request. `ServerSettings` holds the address and port, which default to `127.0.0.1:8000`, and the limits of `events`. The caller owns the `L1Loop`. There are no `Access-Control-*` headers, and no check of `Origin`.
+
+| Route | Answer |
+| :--- | :--- |
+| `GET /live/latest` | The newest scored frame, not the newest captured one. It does not wait: with no frame to serve it is the JSON part alone. |
+| `GET /live/latest?after=<frame id>` | The same, once there is a newer frame, or after about 1 s. An id from before a restart counts as older than any frame. |
+| `GET /live/latest?patches=1` | Also one PNG part per sensor with a patch, encoded only then. |
+| `GET /live/events` | Every sensor's state, then each new state or reason, with a comment line every 15 s. |
+| `GET /live/archive/<path>` | The file, through `rails49-r49`'s `image()`, from a zip or a folder. What it reports absent, or a path with a segment that starts with a dot, is a 404. |
+
+`latest`, `events` and `manifest.json` are `no-store`. `frame_id` holds a token for this run of the service, and readers treat it as opaque.
+
+A frame not at `camera.resolution` is left out of `latest`, because the contract has the frame part at that size, and each sensor says `wrong frame size`. With no frame served, `timings` holds only `rate_fps`.
+
+An `events` client that takes over 2 s over one write, or has over 1000 changes waiting, is dropped, and gets the full state when it reconnects. Each client waits on its own thread, so it holds up neither the others nor the scoring loop.
+
 ## Test
 
 ```sh
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
 
-The L1 tests use a fake capture source and the packaged model, on the CPU. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`.
+The L1 tests use a fake capture source and the packaged model, on the CPU. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`.

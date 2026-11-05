@@ -20,6 +20,7 @@ from PIL import Image
 
 from occupancy_service.capture import Frame
 from occupancy_service.l1 import L1Loop, L1Settings
+from occupancy_service.live_check import check
 from occupancy_service.server import LiveServer, ServerSettings
 
 ONE_SENSOR = {"s1": (160.0, 120.0)}
@@ -607,3 +608,46 @@ def test_a_client_with_too_many_changes_waiting_is_dropped(tmp_path: Path) -> No
             with pytest.raises(AssertionError, match="the stream ended"):
                 while True:
                     stream.next_block()
+
+
+def test_the_checker_passes_with_the_camera_on_and_off(tmp_path: Path) -> None:
+    sensors = {'say "hi"': (160.0, 120.0), "s2": (170.0, 120.0), "no patch": (180.0, 120.0)}
+    archive = folder_archive(tmp_path, sensors)
+    with live(archive, {'say "hi"': 0.9, "s2": 0.1}) as service:
+        assert check(service.base, timeout=5) == []  # Before any frame.
+
+        wait_until_served(service, service.source.show())
+        assert check(service.base, timeout=5) == []
+
+        service.source.state = "lost"
+        assert check(service.base, timeout=5) == []
+
+        service.source.state = "ok"
+        wait_until_served(service, service.source.show(jpeg(WIDTH // 2, HEIGHT)))
+        assert check(service.base, timeout=5) == []  # A frame it cannot serve.
+
+
+def test_the_checker_passes_on_a_zip_with_the_packaged_model(tmp_path: Path) -> None:
+    archive = zip_archive(tmp_path)
+    source = FakeSource()
+    with running(L1Loop(L1Settings(archive), source)) as loop:
+        server = LiveServer(ServerSettings(port=0), archive, loop)
+        server.start()
+        try:
+            frame = source.show()
+            wait_for(lambda: loop.latest().frame == frame)
+            assert check(f"http://127.0.0.1:{server.port}/live", timeout=5) == []
+        finally:
+            server.stop()
+
+
+def test_several_answers_share_one_connection(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        wait_until_served(service, service.source.show())
+        connection = http.client.HTTPConnection("127.0.0.1", service.server.port, timeout=10)
+        for path in ("/live/latest", "/live/archive/manifest.json", "/live/latest?patches=1"):
+            connection.request("GET", path)
+            response = connection.getresponse()
+            assert response.status == 200
+            response.read()
+        connection.close()
