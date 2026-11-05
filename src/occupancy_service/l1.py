@@ -93,12 +93,15 @@ class L1Change:
 class L1Subscription:
     """The L1 changes since ``state``, each sensor's L1 when this subscription began.
 
-    Changes wait here until they are read, so close it when done.
+    Changes wait here until they are read, so close it when done. ``outdated`` turns true at the
+    first result under a manifest newer than ``state``. Changes keep coming after that, but none
+    says that a sensor has gone, so a reader that needs the list of sensors subscribes again.
     """
 
     def __init__(self, state: Mapping[str, L1Entry], close: Callable[[], None]) -> None:
         self.state = state
         self.queue: SimpleQueue[L1Change] = SimpleQueue()
+        self.outdated = False
         self._close = close
 
     def get(self, timeout: float | None = None) -> L1Change | None:
@@ -287,6 +290,7 @@ class L1Loop:
         self._scorer = scorer if scorer is not None else self._load_scorer()
         self._lock = threading.Lock()
         self._geometry = self._read_geometry()
+        self._geometry_in_view = self._geometry
         self._scored: _Scored | None = None
         self._scored_at = 0.0
         self._camera_ok_since: float | None = None
@@ -457,6 +461,11 @@ class L1Loop:
                     self._changes[id] = self._changes.get(id, 0) + 1
                 for subscription in self._subscriptions:
                     subscription.queue.put(L1Change(id, entry))
+        geometry = self._scored.geometry if self._scored is not None else self._geometry
+        if geometry is not self._geometry_in_view:
+            self._geometry_in_view = geometry
+            for subscription in self._subscriptions:
+                subscription.outdated = True
         self._states = dict(result.l1)
         self._changes = {id: self._changes.get(id, 0) for id in result.l1}
         return result

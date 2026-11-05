@@ -174,7 +174,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _events(self) -> None:
         """Every sensor's state, then each change. Only this client's thread ever waits on it. An
-        ``OSError`` from a write drops the client, which reconnects to the full state."""
+        ``OSError`` from a write drops the client, which reconnects to the full state. So does a
+        new manifest, as no event says that a sensor has gone."""
         settings = self.live.settings
         self.close_connection = True
         # A small buffer, so that a client that stops reading is found soon.
@@ -191,7 +192,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(_event(id, entry))
             comment_at = time.monotonic() + settings.comment_every
             while not self.live.stopping.is_set():
-                if subscription.queue.qsize() > settings.max_backlog:
+                if subscription.outdated or subscription.queue.qsize() > settings.max_backlog:
                     return
                 wait = min(_EVENTS_WAKE, max(comment_at - time.monotonic(), 0))
                 change = subscription.get(wait)
