@@ -684,3 +684,26 @@ def test_frames_from_a_real_capture_become_l1(tmp_path: Path) -> None:
 
     assert result.l1["s1"].state in ("occupied", "clear")
     assert 0 <= result.scores["s1"] <= 1
+
+
+def test_a_result_read_with_its_stats_has_that_frames_times(tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    source = FakeSource()
+    frame = source.show()
+
+    with running(L1Loop(L1Settings(archive), source, FakeScorer({"s1": 0.9}))) as loop:
+        served(loop, frame)
+        result, stats = loop.read()
+
+    assert result.frame == frame
+    assert (stats.cut_ms, stats.classify_ms) == (1.0, 2.0)
+    assert stats.changes == {"s1": 1}
+
+
+def test_a_result_says_when_its_frame_is_not_at_the_cameras_resolution(tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    source = FakeSource()
+
+    with running(L1Loop(L1Settings(archive), source, FakeScorer({"s1": 0.9}))) as loop:
+        assert served(loop, source.show()).wrong_frame_size is False
+        assert served(loop, source.show(jpeg(WIDTH // 2, HEIGHT))).wrong_frame_size is True
