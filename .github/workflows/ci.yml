@@ -25,4 +25,7 @@ jobs:
           version: "0.12.6"
           enable-cache: true
 
+      # The capture test of the real ffmpeg command line is skipped without it.
+      - run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+
       - run: bin/test.sh
