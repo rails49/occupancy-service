@@ -19,8 +19,7 @@ Nothing here is a safety interlock.
 | `GET <base>/latest` | yes | The latest frame and its L1 |
 | `GET <base>/events` | yes | Every L1 change |
 | `<base>/archive/` | yes | The archive |
-
-Saving back to the archive is optional. rails49/occupancy-service#7 defines it.
+| `PUT` and `DELETE` under `<base>/archive/` | no | [Saving](#saving) back to the archive |
 
 MQTT is not in the contract. The [README](README.md#mqtt) documents the profiles.
 
@@ -177,6 +176,48 @@ data: {"sensor": "C3.B", "state": "unknown", "reason": "no frames"}
 
 Serves the archive in the URL form of rails49/r49#60: `<base>/archive/manifest.json` and `<base>/archive/<filename>`. `manifest.json` has the content type `application/json`.
 
+## Saving
+
+Saving back to the archive is optional. A service offers it when the archive is a folder it can write to. `GET <base>/archive/manifest.json` then carries a strong `ETag`: the SHA-256 of the file's bytes, in hex, in double quotes.
+
+With no `ETag`, as with a zip or a read-only folder, `PUT` and `DELETE` answer 405 with `Allow: GET`.
+
+A page writes the images, then the manifest, then deletes the images it removed. It sends the `ETag` it read in `If-Match` each time, and takes the new one from the manifest's answer.
+
+### Every write
+
+Under `<base>/archive/<path>`, checked in this order:
+
+| Status | When |
+| :--- | :--- |
+| 403 | The `Origin` is foreign, by the rule in [control's ADR-0057](https://github.com/rails49/control/blob/main/docs/adr/0057-one-origin-rule-and-both-faces-read-it.md). No `Origin` passes. |
+| 428 | There is no `If-Match`. |
+| 412 | `If-Match` is anything but the current manifest's `ETag`. |
+| 404 | `manifest/filename` refuses the name, or a segment starts with a dot. Names are percent-decoded as on `GET`. |
+| 411 | A `PUT` has no `Content-Length`. |
+
+### Routes
+
+| Route | Answer |
+| :--- | :--- |
+| `PUT <filename>` | 204. Stores the image, creating folders as needed, and replaces a file already there. 409 if a folder is at that name, or a file on the way to it. |
+| `PUT manifest.json` | 204 with the new `ETag`. 422 with the rule in a JSON `error` field if it is refused, as below. |
+| `DELETE <filename>` | 204. 409 if the manifest still names the file, or the name is `manifest.json`. 404 if there is no such file. |
+
+| `error` | A manifest is refused because |
+| :--- | :--- |
+| A rule of [r49's FORMAT.md](https://github.com/rails49/r49/blob/main/FORMAT.md) | `parse_manifest` refuses it, under that rule. |
+| `images/missing` | It names an image that is absent. |
+| `manifest/id` | It changes or removes an `id` the archive has. |
+
+### After a save
+
+- Of two saves from one copy, one succeeds and the other gets 412.
+- A failed write leaves the old file in place. A crash or a refused save may leave an image no manifest names, which a reader reports as an orphan, and which does no harm.
+- The next frame scored uses the new manifest. A sensor that stays gets no `unknown` from the save.
+- `events` clients are closed at the first result under the new manifest. A reader treats a connect as the full list of sensors.
+- The service does not watch the folder. A hand edit takes effect at restart, and a page holding the earlier copy is refused.
+
 ## Conformance
 
 One command checks a running implementation against this document:
@@ -186,6 +227,8 @@ uvx --from git+https://github.com/rails49/occupancy-service live-check <base>
 ```
 
 It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. If it cannot read the manifest it stops there, because the other rules need it.
+
+With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. Without the flag it writes nothing.
 
 It checks format and consistency only. Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
 
@@ -231,5 +274,12 @@ It checks format and consistency only. Timing rules need control of a camera, so
 | `events/data` | An event's data is not a JSON object with a non-empty `sensor`. |
 | `events/extra-sensor` | An event names a sensor not in the manifest. |
 | `events/missing-sensor` | A sensor in the manifest has no state on connecting. |
+| `save/not-offered` | With `--save` and no `ETag`, a write does not answer 405 with `Allow: GET`. |
+| `save/etag` | With `--save`, the `ETag` is not the SHA-256 of the manifest's bytes in double quotes. |
+| `save/if-match-missing` | With `--save`, a save with no `If-Match` does not answer 428. |
+| `save/if-match-stale` | With `--save`, a save with another `If-Match` does not answer 412. |
+| `save/origin` | With `--save`, a save with a foreign `Origin` does not answer 403. |
+| `save/manifest-refused` | With `--save`, a manifest with no version does not answer 422 with a JSON `error` field. |
+| `save/rewrite` | With `--save`, a rewrite of the same bytes does not answer 204 with the same `ETag`. |
 
 An event breaks the `l1/` rules as an entry in `latest` does.

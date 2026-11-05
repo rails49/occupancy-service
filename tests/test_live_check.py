@@ -476,3 +476,80 @@ def test_names_json_nested_too_deep_to_read() -> None:
 def test_names_a_frame_too_large_to_decode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
     assert failures(Stub()) == ["frame/jpeg"]
+
+
+def save_rules(stub: Stub) -> list[str]:
+    """The rules ``stub`` breaks with ``--save``. Each one must be a rule LIVE.md lists."""
+    with serving(stub) as base:
+        rules = [failure.rule for failure in check(base, timeout=2, save=True)]
+    for rule in rules:
+        assert f"`{rule}`" in LIVE_MD
+    return rules
+
+
+def test_without_the_flag_the_checker_writes_nothing() -> None:
+    stub = Stub(offers_saving=True, checks_if_match=False)
+    before = stub.manifest
+    with serving(stub) as base:
+        assert check(base, timeout=2) == []
+    assert stub.writes == []
+    assert stub.manifest == before
+
+
+def test_save_accepts_a_service_that_saves_and_leaves_the_manifest_as_it_was() -> None:
+    stub = Stub(offers_saving=True)
+    before = stub.manifest
+    assert save_rules(stub) == []
+    assert stub.writes == [before]
+    assert stub.manifest == before
+
+
+def test_save_accepts_a_service_with_no_etag_that_answers_405() -> None:
+    assert save_rules(Stub()) == []
+
+
+@pytest.mark.parametrize(
+    "stub",
+    [Stub(not_offered_status=204), Stub(not_offered_status=501), Stub(not_offered_allow=None)],
+)
+def test_save_refuses_a_service_with_no_etag_that_does_not_answer_405(stub: Stub) -> None:
+    assert save_rules(stub) == ["save/not-offered"] * 2  # One for PUT, and one for DELETE.
+
+
+def test_save_refuses_a_stub_that_skips_if_match() -> None:
+    assert save_rules(Stub(offers_saving=True, checks_if_match=False)) == [
+        "save/if-match-missing",
+        "save/if-match-stale",
+    ]
+
+
+def test_save_refuses_a_stub_that_skips_the_origin_check() -> None:
+    assert save_rules(Stub(offers_saving=True, checks_origin=False)) == ["save/origin"]
+
+
+def test_save_refuses_a_stub_that_takes_a_bad_manifest_and_puts_the_old_one_back() -> None:
+    stub = Stub(offers_saving=True, checks_manifest=False)
+    before = stub.manifest
+    assert save_rules(stub) == ["save/manifest-refused"]
+    assert stub.manifest == before
+
+
+def test_save_refuses_a_422_with_no_error_field() -> None:
+    assert save_rules(Stub(offers_saving=True, no_error_field=True)) == ["save/manifest-refused"]
+
+
+def test_save_refuses_an_etag_that_is_not_the_sha_256_of_the_bytes() -> None:
+    rules = save_rules(Stub(offers_saving=True, wrong_etag='"not-the-digest"'))
+    assert rules == ["save/etag"]
+
+
+def test_save_refuses_a_rewrite_that_fails() -> None:
+    assert save_rules(Stub(offers_saving=True, rewrite_fails=True)) == ["save/rewrite"]
+
+
+def test_the_command_takes_the_save_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    stub = Stub(offers_saving=True, checks_origin=False)
+    with serving(stub) as base:
+        with pytest.raises(SystemExit):
+            main([base, "--save"])
+    assert "save/origin" in capsys.readouterr().out

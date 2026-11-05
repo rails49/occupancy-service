@@ -17,6 +17,7 @@ The process that runs it all is not written yet: `Capture`, `L1Loop`, `LiveServe
 
 ```sh
 uv run live-check http://localhost:8000/live
+uv run live-check --save http://localhost:8000/live    # also rewrites manifest.json with its own bytes
 ```
 
 ## L1
@@ -42,7 +43,7 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 
 ## HTTP
 
-`occupancy_service.server` serves [LIVE.md](LIVE.md) under a fixed `/live`, with a thread per request. `ServerSettings` holds the address and port, which default to `127.0.0.1:8000`, and the limits of `events`. The caller owns the `L1Loop`. There are no `Access-Control-*` headers, and no check of `Origin`.
+`occupancy_service.server` serves [LIVE.md](LIVE.md) under a fixed `/live`, with a thread per request. `ServerSettings` holds the address and port, which default to `127.0.0.1:8000`, and the limits of `events`. The caller owns the `L1Loop`. There are no `Access-Control-*` headers. Only a write checks `Origin`.
 
 | Route | Answer |
 | :--- | :--- |
@@ -51,6 +52,8 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 | `GET /live/latest?patches=1` | Also one PNG part per sensor with a patch, encoded only then. |
 | `GET /live/events` | Every sensor's state, then each new state or reason, with a comment line every 15 s. |
 | `GET /live/archive/<path>` | The file, through `rails49-r49`'s `image()`, from a zip or a folder. What it reports absent, or a path with a segment that starts with a dot, is a 404. |
+
+`PUT` and `DELETE` under `/live/archive/` [save back to a folder archive](LIVE.md#saving). `occupancy_service.archive_writer` does the writing, because `rails49-r49` only reads: each file goes to a dot-named temp file in its folder, is flushed to disk, then renamed. A saved manifest reloads the `L1Loop`. `occupancy_service.origin` holds a copy of `is_own_page` from `control`, with the code unchanged, and a change there is copied here by hand.
 
 `latest`, `events` and `manifest.json` are `no-store`. `frame_id` holds a token for this run of the service, and readers treat it as opaque.
 
