@@ -7,6 +7,7 @@ import mimetypes
 import os
 import secrets
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -28,6 +29,8 @@ _BASE = "/live"
 _LATEST = f"{_BASE}/latest"
 _ARCHIVE = f"{_BASE}/archive/"
 _MANIFEST = "manifest.json"
+_AFTER_WAIT = 1.0  # Seconds ``after`` waits for a newer frame.
+_AFTER_POLL = 0.01  # Seconds between looks for one, as often as the loop looks for a new frame.
 _IDLE_TIMEOUT = 30.0  # Seconds an idle connection stays open, and any one write may take.
 
 
@@ -59,6 +62,17 @@ class LiveServer:
     @property
     def port(self) -> int:
         return self._http.server_address[1]
+
+    def seen_frame(self, frame_id: str) -> int:
+        """The ``Frame.id`` of a ``frame_id`` this run gave, and otherwise 0: any frame is newer
+        than one from before a restart, or than an id that is no frame's."""
+        run_id, _, number = frame_id.rpartition("-")
+        if run_id != self.run_id:
+            return 0
+        try:
+            return int(number)
+        except ValueError:
+            return 0
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -100,9 +114,7 @@ class _Handler(BaseHTTPRequestHandler):
         _log.debug(format, *args)
 
     def _latest(self, query: Mapping[str, list[str]]) -> None:
-        result, stats = self.live.loop.read()
-        # The contract has a frame part at camera.resolution, and no frame part with no frame.
-        frame = None if result.wrong_frame_size else result.frame
+        result, stats, frame = self._read(query.get("after", [None])[0])
         frame_id = None if frame is None else f"{self.live.run_id}-{frame.id}"
         fields = _fields(result, stats, frame, frame_id)
         parts = []
@@ -120,6 +132,20 @@ class _Handler(BaseHTTPRequestHandler):
         delimiter = f"--{boundary}\r\n".encode()
         body = b"".join(delimiter + part for part in parts) + f"--{boundary}--\r\n".encode()
         self._reply(body, f"multipart/form-data; boundary={boundary}", no_store=True)
+
+    def _read(self, after: str | None) -> tuple[L1Result, L1Stats, Frame | None]:
+        """The newest result and the frame to serve with it. With ``after``, the first with a newer
+        frame within about 1 s, or else the newest at the end of that."""
+        seen = 0 if after is None else self.live.seen_frame(after)
+        deadline = time.monotonic() + _AFTER_WAIT
+        while True:
+            result, stats = self.live.loop.read()
+            # The contract has a frame part at camera.resolution, and no frame part with no frame.
+            frame = None if result.wrong_frame_size else result.frame
+            newer = frame is not None and frame.id > seen
+            if after is None or newer or time.monotonic() >= deadline:
+                return result, stats, frame
+            self.live.stopping.wait(_AFTER_POLL)
 
     def _archive_file(self, name: str) -> None:
         # A folder or a zip would not refuse every dot path by itself, and this is a direct
