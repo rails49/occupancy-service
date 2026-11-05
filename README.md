@@ -13,7 +13,7 @@ bin/install-hooks.sh    # refuse commits on main, and run the gate before each p
 
 ## Run
 
-The process that runs it all is not written yet: `Capture`, `L1Loop` and `LiveServer` are started by the caller. `live-check` tests a running implementation against the contract:
+The process that runs it all is not written yet: `Capture`, `L1Loop`, `LiveServer` and `Publisher` are started by the caller. `live-check` tests a running implementation against the contract:
 
 ```sh
 uv run live-check http://localhost:8000/live
@@ -58,10 +58,80 @@ A frame not at `camera.resolution` is left out of `latest`, because the contract
 
 An `events` client that takes over 2 s over one write, or has over 1000 changes waiting, is dropped, and gets the full state when it reconnects. Each client waits on its own thread, so it holds up neither the others nor the scoring loop.
 
+## MQTT
+
+`occupancy_service.publisher` publishes L1 as its active profiles say, over one connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (30 s), and the timeout of connecting and of a write (2 s). To report in `latest`, pass `publisher.last_messages` to `LiveServer`.
+
+Every sensor goes out on each connect and on each repeat, and each change goes out at once. A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
+
+### Profile files
+
+A profile is a TOML file. The `profiles` setting names each by a shipped profile's name, or by a path holding a `/` or ending in `.toml`. A profile is called by its file's name, and two active ones cannot share a name. A file with anything wrong or unknown in it stops the `Publisher` being made.
+
+| Key | Holds |
+| :--- | :--- |
+| `topic` | The topic template. It may hold `{sensor}` and `{archive_id}`. |
+| `payload.occupied`, `payload.clear`, `payload.unknown` | What to send. A table is sent as JSON, and a string as text. Each may hold `{sensor}`, `occupied` also `{confidence}`, and `unknown` also `{reason}`. |
+| `retain` | `true` or `false`. |
+| `qos` | 0, 1 or 2. |
+| `repeat` | Seconds between sending every sensor, above 0. |
+
+In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
+
+A topic that holds `{archive_id}` publishes nothing while the archive has no `id`. A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/` or a NUL or makes a topic MQTT does not allow, is logged once, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
+
+### The shipped profiles
+
+`occupancy`, this service's own vocabulary. Each message is an [L1 entry](LIVE.md#l1-entry):
+
+```toml
+topic = "occupancy/{archive_id}/sensor/{sensor}"
+retain = false
+qos = 0
+repeat = 1
+
+[payload.occupied]
+state = "occupied"
+confidence = "{confidence}"
+
+[payload.clear]
+state = "clear"
+
+[payload.unknown]
+state = "unknown"
+reason = "{reason}"
+```
+
+`control`, whose contract is rails49/control#1147. It has no last will, because `layout` has a timer per sensor. That timer wants every sensor at least once a second, so `repeat` leaves room for one to be late:
+
+```toml
+topic = "tc49/layout/sensor"
+retain = false
+qos = 0
+repeat = 0.9
+
+[payload.occupied]
+addr = "{sensor}"
+occupancy = "occupied"
+
+[payload.clear]
+addr = "{sensor}"
+occupancy = "clear"
+
+[payload.unknown]
+addr = "{sensor}"
+occupancy = "unknown"
+reason = "{reason}"
+```
+
+A string payload is written the same way, as `clear = "OFF {sensor}"` under `[payload]`.
+
+`mqtt.py` is a small client, not a library: it publishes, and does not retransmit, because the next connection sends every sensor again.
+
 ## Test
 
 ```sh
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
 
-The L1 tests use a fake capture source and the packaged model, on the CPU. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`.
+The L1 tests use a fake capture source and the packaged model, on the CPU. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both.
