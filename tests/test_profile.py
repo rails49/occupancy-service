@@ -64,6 +64,16 @@ def test_only_a_topic_that_names_the_archive_id_needs_one() -> None:
     assert not load_profile("control").needs_archive_id
 
 
+@pytest.mark.parametrize(
+    ("line", "seconds"), [("", 0), ("clear_hold_s = 0", 0), ("clear_hold_s = 0.25", 0.25)]
+)
+def test_a_profile_may_set_a_hold_of_any_time_from_0(
+    tmp_path: Path, line: str, seconds: float
+) -> None:
+    path = write(tmp_path, VALID.replace("[payload]", f"{line}\n[payload]"))
+    assert load_profile(str(path)).clear_hold_s == seconds
+
+
 def test_a_path_loads_a_profile_named_after_its_file(tmp_path: Path) -> None:
     profile = load_profile(str(write(tmp_path, VALID)))
     assert profile.name == "mine"
@@ -177,6 +187,11 @@ def test_a_sensor_id_with_a_lone_surrogate_still_goes_out_as_text(tmp_path: Path
         (lambda text: text.replace("qos = 0", "qos = true"), "qos"),
         (lambda text: text.replace("repeat = 1", "repeat = 0"), "repeat"),
         (lambda text: text.replace("repeat = 1", "repeat = true"), "repeat"),
+        (lambda text: text.replace("[payload]", "clear_hold_s = -1\n[payload]"), "clear_hold_s"),
+        (lambda text: text.replace("[payload]", "clear_hold_s = true\n[payload]"), "clear_hold_s"),
+        (lambda text: text.replace("[payload]", 'clear_hold_s = "1"\n[payload]'), "clear_hold_s"),
+        (lambda text: text.replace("[payload]", "clear_hold_s = nan\n[payload]"), "clear_hold_s"),
+        (lambda text: text.replace("[payload]", "clear_hold_s = inf\n[payload]"), "clear_hold_s"),
         (lambda text: text.replace("t/{sensor}", "t/+/{sensor}"), "topic"),
         (lambda text: text.replace("t/{sensor}", "t/#"), "topic"),
         (lambda text: text.replace("t/{sensor}", ""), "topic"),
