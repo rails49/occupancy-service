@@ -9,7 +9,7 @@ import secrets
 import socket
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +23,7 @@ from PIL import Image
 
 from occupancy_service.capture import CaptureStatus, Frame
 from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Stats
+from occupancy_service.publisher import LastMessage
 
 _log = logging.getLogger(__name__)
 
@@ -58,12 +59,20 @@ class LiveServer:
     """A thread per request, reading from ``loop`` and ``archive``. The caller owns the loop."""
 
     def __init__(
-        self, settings: ServerSettings, archive: str | os.PathLike[str], loop: L1Loop
+        self,
+        settings: ServerSettings,
+        archive: str | os.PathLike[str],
+        loop: L1Loop,
+        last_messages: Callable[[], Mapping[str, Mapping[str, LastMessage]]] | None = None,
     ) -> None:
-        """Binds the address, and raises the ``OSError`` when it cannot."""
+        """Binds the address, and raises the ``OSError`` when it cannot.
+
+        ``last_messages`` is a ``Publisher``'s, and without it ``latest`` has no such field.
+        """
         self.settings = settings
         self.archive = archive
         self.loop = loop
+        self.last_messages = last_messages
         self.stopping = threading.Event()
         # A frame's id starts again at 1 on a restart, and a reader's id from before one must not
         # read as a frame still to come.
@@ -131,6 +140,8 @@ class _Handler(BaseHTTPRequestHandler):
         result, stats, frame = self._read(query.get("after", [None])[0])
         frame_id = None if frame is None else f"{self.live.run_id}-{frame.id}"
         fields = _fields(result, stats, frame, frame_id)
+        if self.live.last_messages is not None:
+            fields["last_messages"] = _last_messages(self.live.last_messages(), result)
         parts = []
         if query.get("patches") == ["1"]:
             patches = {} if frame is None else result.patches
@@ -239,6 +250,20 @@ def _fields(
     if result.threshold is not None:
         fields["threshold"] = float(result.threshold)
     return fields
+
+
+def _last_messages(
+    sent: Mapping[str, Mapping[str, LastMessage]], result: L1Result
+) -> dict[str, Any]:
+    """What went out for each sensor in ``result``, which may be fewer than the publisher has."""
+    return {
+        id: {
+            profile: {"message": last.message, "time": last.time.isoformat()}
+            for profile, last in by_profile.items()
+        }
+        for id, by_profile in sent.items()
+        if id in result.l1
+    }
 
 
 def _entry(entry: L1Entry) -> dict[str, Any]:

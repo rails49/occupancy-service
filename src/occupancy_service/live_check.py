@@ -305,6 +305,18 @@ def _is_l0(value: Any) -> bool:
     )
 
 
+def _is_last_message(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("message"), str | dict)
+        and _is_time(value.get("time"))
+    )
+
+
+def _is_by_profile(value: Any) -> bool:
+    return isinstance(value, dict) and all(_is_last_message(entry) for entry in value.values())
+
+
 _OPTIONAL: dict[str, Callable[[Any, set[str]], bool]] = {
     "l0": lambda value, _: _is_l0(value),
     "scores": lambda value, sensors: _by_sensor(value, sensors, lambda v: _is_number(v, high=1)),
@@ -316,6 +328,7 @@ _OPTIONAL: dict[str, Callable[[Any, set[str]], bool]] = {
         value, ("capture_ms", "decode_ms", "cut_ms", "classify_ms", "rate_fps")
     ),
     "camera": lambda value, _: _is_camera(value),
+    "last_messages": lambda value, sensors: _by_sensor(value, sensors, _is_by_profile),
 }
 
 
