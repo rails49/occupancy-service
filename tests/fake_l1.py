@@ -18,6 +18,7 @@ import r49
 from PIL import Image
 
 from occupancy_service.capture import CaptureStatus, Frame
+from occupancy_service.drift import Gray
 from occupancy_service.l1 import L1Loop, Scoring
 
 WIDTH, HEIGHT = 320, 240
@@ -40,6 +41,21 @@ TRACK = {
 def jpeg(width: int = WIDTH, height: int = HEIGHT, color: str = "gray") -> bytes:
     out = io.BytesIO()
     Image.new("RGB", (width, height), color).save(out, "JPEG")
+    return out.getvalue()
+
+
+def png(plane: npt.NDArray[np.uint8]) -> bytes:
+    out = io.BytesIO()
+    Image.fromarray(plane).save(out, "PNG")
+    return out.getvalue()
+
+
+def picture(dx: int = 0, format: str = "PNG") -> bytes:
+    """A view at the test camera's size of one noise picture, from ``dx`` pixels to the right."""
+    rng = np.random.default_rng(11)
+    whole = rng.integers(0, 256, (HEIGHT, WIDTH + 64, 3), np.uint8)
+    out = io.BytesIO()
+    Image.fromarray(whole[:, dx : dx + WIDTH]).save(out, format, quality=95)
     return out.getvalue()
 
 
@@ -140,3 +156,28 @@ class FakeScorer:
             for s in sensors
         }
         return Scoring(results, cut_ms=1.0, classify_ms=2.0)
+
+
+class FakeChecks:
+    """Stands in for ``DriftCheck``: every check reads ``px``, or raises it. With ``gate`` a reading
+    waits there before it answers."""
+
+    def __init__(self, px: float | Exception = 0.0) -> None:
+        self.px = px
+        self.gate: threading.Event | None = None
+        self.built = 0
+        self.reads = 0
+        self.reading = threading.Event()
+
+    def __call__(self, reference: Gray) -> "FakeChecks":
+        self.built += 1
+        return self
+
+    def read(self, frame: Gray) -> float:
+        self.reads += 1
+        self.reading.set()
+        if self.gate is not None:
+            self.gate.wait()
+        if isinstance(self.px, Exception):
+            raise self.px
+        return self.px

@@ -25,6 +25,7 @@ from PIL import Image
 from occupancy_service.archive_writer import MANIFEST as _MANIFEST
 from occupancy_service.archive_writer import ArchiveWriter, Refused, can_name, etag_of
 from occupancy_service.capture import CaptureStatus, Frame
+from occupancy_service.drift import DriftReading, DriftUnmeasured
 from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Stats
 from occupancy_service.origin import is_own_page
 from occupancy_service.publisher import LastMessage
@@ -364,6 +365,8 @@ def _fields(
     }
     if result.threshold is not None:
         fields["threshold"] = float(result.threshold)
+    if result.drift is not None:
+        fields["drift"] = _drift(result.drift)
     return fields
 
 
@@ -388,6 +391,12 @@ def _entry(entry: L1Entry) -> dict[str, Any]:
     if entry.state == "unknown":
         return {"state": "unknown", "reason": entry.reason}
     return {"state": "clear"}
+
+
+def _drift(drift: DriftReading | DriftUnmeasured) -> dict[str, Any]:
+    if isinstance(drift, DriftUnmeasured):
+        return {"unmeasured": drift.reason}
+    return {"px": drift.px, "tolerance_px": drift.tolerance_px, "past": drift.past}
 
 
 def _timings(stats: L1Stats, has_frame: bool) -> dict[str, float]:

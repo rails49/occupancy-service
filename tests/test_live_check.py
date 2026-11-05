@@ -231,6 +231,7 @@ def every_optional_field() -> dict[str, Any]:
             "rate_fps": 14.5,
         },
         "camera": {"state": "ok", "rate_fps": 15, "frame_age_ms": 20},
+        "drift": {"px": 2.0, "tolerance_px": 8.25, "past": False},
         "last_messages": {
             "C3.A": {
                 "occupancy": {
@@ -283,6 +284,18 @@ def test_accepts_the_json_only_answer_with_optional_fields() -> None:
         ("camera", {"state": "fine"}),
         ("camera", {"rate_fps": "15"}),
         ("camera", {"frame_age_ms": -1}),
+        ("drift", []),
+        ("drift", {}),
+        ("drift", {"unmeasured": ""}),
+        ("drift", {"unmeasured": 1}),
+        ("drift", {"px": 1, "tolerance_px": 2}),
+        ("drift", {"px": "1", "tolerance_px": 2, "past": False}),
+        ("drift", {"px": -1, "tolerance_px": 2, "past": False}),
+        ("drift", {"px": 1, "past": False}),
+        ("drift", {"px": 1, "tolerance_px": 2, "past": 0}),
+        ("drift", {"px": 1, "tolerance_px": 2, "past": True}),
+        ("drift", {"px": 2, "tolerance_px": 2, "past": True}),
+        ("drift", {"px": 3, "tolerance_px": 2, "past": False}),
         ("last_messages", []),
         ("last_messages", {"ghost": {}}),
         ("last_messages", {"C3.A": []}),
@@ -295,6 +308,18 @@ def test_accepts_the_json_only_answer_with_optional_fields() -> None:
 )
 def test_refuses_a_malformed_optional_field(field: str, value: Any) -> None:
     assert failures(patched(latest_extra={field: value})) == [f"optional/{field}"]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        {"unmeasured": "no first image"},
+        {"px": 2, "tolerance_px": 2, "past": False},
+        {"px": 3, "tolerance_px": 2, "past": True},
+    ],
+)
+def test_accepts_each_form_of_drift(drift: dict[str, Any]) -> None:
+    assert failures(patched(latest_extra={"drift": drift})) == []
 
 
 def test_accepts_a_key_it_does_not_know_inside_an_optional_field() -> None:

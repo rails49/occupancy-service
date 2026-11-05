@@ -11,11 +11,20 @@ from typing import Any
 
 import numpy as np
 import pytest
-from fake_l1 import HEIGHT, WIDTH, FakeScorer, FakeSource, running, wait_for, write_archive
+from fake_l1 import (
+    FakeChecks,
+    FakeScorer,
+    FakeSource,
+    picture,
+    png,
+    running,
+    wait_for,
+    write_archive,
+)
 from PIL import Image
 
 from occupancy_service.capture import Frame
-from occupancy_service.drift import DriftCheck, DriftReading, DriftUnmeasured, Gray, gray_of
+from occupancy_service.drift import DriftCheck, DriftReading, DriftUnmeasured, gray_of
 from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings
 
 _SHARED = json.loads((Path(__file__).parent.parent / "conformance" / "drift.json").read_text())
@@ -69,52 +78,14 @@ DRIFT = L1Entry("unknown", reason="drift")
 TOLERANCE_PX: Any = pytest.approx(8.247, abs=1e-3)  # 0.5 G at the test archive's DPT of 16.494.
 
 
-class FakeChecks:
-    """Stands in for ``DriftCheck``: every check reads ``px``, or raises it. With ``gate`` a reading
-    waits there before it answers."""
-
-    def __init__(self, px: float | Exception = 0.0) -> None:
-        self.px = px
-        self.gate: threading.Event | None = None
-        self.built = 0
-        self.reads = 0
-        self.reading = threading.Event()
-
-    def __call__(self, reference: Gray) -> "FakeChecks":
-        self.built += 1
-        return self
-
-    def read(self, frame: Gray) -> float:
-        self.reads += 1
-        self.reading.set()
-        if self.gate is not None:
-            self.gate.wait()
-        if isinstance(self.px, Exception):
-            raise self.px
-        return self.px
-
-
-def _png(plane: Any) -> bytes:
-    out = io.BytesIO()
-    Image.fromarray(plane).save(out, "PNG")
-    return out.getvalue()
-
-
-def _picture(dx: int = 0) -> bytes:
-    """A view at the test camera's size of one noise picture, from ``dx`` pixels to the right."""
-    rng = np.random.default_rng(11)
-    picture = rng.integers(0, 256, (HEIGHT, WIDTH + 64, 3), np.uint8)
-    return _png(picture[:, dx : dx + WIDTH])
-
-
 def _archive(tmp_path: Path, **replaced: Any) -> Path:
     """An archive whose first image is ``first.png``, and which also holds ``second.png``, the
     camera's view from 20 pixels away."""
     folder = write_archive(
         tmp_path / "archive", SENSORS, **{"images": [{"filename": "first.png"}], **replaced}
     )
-    (folder / "first.png").write_bytes(_picture())
-    (folder / "second.png").write_bytes(_picture(dx=20))
+    (folder / "first.png").write_bytes(picture())
+    (folder / "second.png").write_bytes(picture(dx=20))
     return folder
 
 
@@ -154,16 +125,16 @@ def test_a_moved_camera_refuses_every_sensor_and_putting_it_back_restores_l1(
     tmp_path: Path,
 ) -> None:
     source = FakeSource()
-    source.show(_picture())
+    source.show(picture())
     with running(_loop(_archive(tmp_path), source)) as loop:
         _l1_is(loop, REPORTING)
         assert _first_reading(loop) == DriftReading(0.0, TOLERANCE_PX)
 
-        source.show(_picture(dx=20))
+        source.show(picture(dx=20))
         refused = _l1_is(loop, {"s1": DRIFT, "s2": DRIFT})
         assert refused.drift == DriftReading(20.0, TOLERANCE_PX)
 
-        source.show(_picture())
+        source.show(picture())
         assert _l1_is(loop, REPORTING).drift == DriftReading(0.0, TOLERANCE_PX)
 
 
@@ -292,7 +263,7 @@ def test_a_first_image_that_does_not_decode_is_a_failed_check(tmp_path: Path) ->
 def test_a_first_image_too_small_to_read_is_a_failed_check(tmp_path: Path) -> None:
     source = FakeSource()
     archive = _archive(tmp_path)
-    (archive / "first.png").write_bytes(_png(np.zeros((16, 64, 3), np.uint8)))
+    (archive / "first.png").write_bytes(png(np.zeros((16, 64, 3), np.uint8)))
     with running(_loop(archive, source)) as loop:
         frame = source.show()
         wait_for(lambda: loop.latest().drift == DriftUnmeasured("check failed"))
@@ -336,7 +307,7 @@ def test_turned_off_there_is_no_reading_and_no_refusal(tmp_path: Path) -> None:
 def test_a_reload_measures_against_the_new_first_image(tmp_path: Path) -> None:
     archive = _archive(tmp_path)
     source = FakeSource()
-    source.show(_picture())
+    source.show(picture())
     with running(_loop(archive, source)) as loop:
         assert _first_reading(loop) == DriftReading(0.0, TOLERANCE_PX)
         _l1_is(loop, REPORTING)
