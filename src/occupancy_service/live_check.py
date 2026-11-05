@@ -18,7 +18,7 @@ from typing import Any
 from urllib.parse import quote
 
 import r49
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 _TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
 _PATCH_PART = re.compile(r"patch-\d+")
@@ -164,6 +164,10 @@ def _frame_failures(frame: _Part, size: tuple[int, int]) -> Iterator[Failure]:
         with Image.open(io.BytesIO(frame.body)) as image:
             image.load()
             found, jpeg_format = image.size, image.format == "JPEG"
+    except UnidentifiedImageError:
+        # Not Pillow's message: it has an address in it, which defeats check()'s dedupe.
+        yield Failure("frame/jpeg", "the frame part is not an image")
+        return
     except (OSError, Image.DecompressionBombError) as error:
         yield Failure("frame/jpeg", f"the frame part does not decode: {error}")
         return
