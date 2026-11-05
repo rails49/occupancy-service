@@ -33,10 +33,6 @@ class Broker:
     def __init__(self, binary: str, folder: Path) -> None:
         self.binary = binary
         self.port = _free_port()
-        self.config = folder / "mosquitto.conf"
-        self.config.write_text(
-            f"listener {self.port} 127.0.0.1\nallow_anonymous true\npersistence false\n"
-        )
         self.log = folder / "mosquitto.log"
         self.process: subprocess.Popen[bytes] | None = None
         self.log_file: IO[bytes] | None = None
@@ -44,7 +40,7 @@ class Broker:
     def start(self) -> None:
         self.log_file = self.log.open("ab")
         self.process = process = subprocess.Popen(
-            [self.binary, "-c", str(self.config)], stdout=self.log_file, stderr=self.log_file
+            [self.binary, "-p", str(self.port)], stdout=self.log_file, stderr=self.log_file
         )
         deadline = time.monotonic() + 10
         while True:
