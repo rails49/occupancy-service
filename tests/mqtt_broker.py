@@ -1,6 +1,7 @@
 """A real ``mosquitto`` for the tests, and a subscriber that records what it delivers."""
 
 import os
+import secrets
 import shutil
 import socket
 import struct
@@ -79,7 +80,8 @@ class Subscriber:
     def __init__(self, port: int, qos: int = 0) -> None:
         self.messages: list[Received] = []
         self.socket = socket.create_connection(("127.0.0.1", port), timeout=5)
-        client_id = b"test-subscriber"
+        # Its own id: a broker drops a client when another connects with the same one.
+        client_id = f"test-subscriber-{secrets.token_hex(4)}".encode()
         variable = b"\x00\x04MQTT\x04\x02\x00\x00" + struct.pack(">H", len(client_id)) + client_id
         self.socket.sendall(bytes([0x10, len(variable)]) + variable)
         assert self._read_packet()[0] == 2  # CONNACK
@@ -91,7 +93,10 @@ class Subscriber:
         self.thread.start()
 
     def close(self) -> None:
-        self.socket.shutdown(socket.SHUT_RDWR)
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # A broker that has stopped: macOS refuses this on a socket its peer closed.
         self.socket.close()
         self.thread.join(5)
 
