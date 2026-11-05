@@ -173,6 +173,8 @@ def test_a_retained_profile_is_retained(broker: Broker, tmp_path: Path) -> None:
         wait_for(lambda: first.on("own/a"))
         with subscribed(broker) as late:
             assert late.wait_for(lambda message: message.retain).topic == "own/a"
+        source.show({"a": OCCUPIED})  # The late subscriber has not displaced the first.
+        first.wait_for(lambda message: payload(message)["state"] == "occupied")
 
 
 @pytest.mark.parametrize(("published", "delivered"), [(0, 0), (1, 1), (2, 1)])
