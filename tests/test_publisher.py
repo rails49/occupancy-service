@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fake_l1 import FakeScorer, FakeSource, running, wait_for, write_archive
+from fake_l1 import FakeChecks, FakeScorer, FakeSource, picture, running, wait_for, write_archive
 from mqtt_broker import Broker, Received, Subscriber, mosquitto
 
 from occupancy_service.capture import Frame
@@ -316,6 +316,35 @@ def test_scoring_stalled_goes_out_when_results_stop_and_the_publisher_keeps_runn
         assert payload(subscriber.messages[-1])["reason"] == "scoring stalled"
         source.show()
         subscriber.wait_for(lambda m: m.at > stalled.at and payload(m)["state"] == "occupied")
+
+
+def test_every_profile_carries_a_drift_refusal_as_any_unknown(
+    broker: Broker, tmp_path: Path
+) -> None:
+    archive = write_archive(
+        tmp_path / "archive", {"s1": (160.0, 120.0)}, images=[{"filename": "first.png"}]
+    )
+    (archive / "first.png").write_bytes(picture())
+    source = FakeSource()
+    checks = FakeChecks()
+    settings = L1Settings(archive, drift_every=0.01)
+    loop = L1Loop(settings, source, FakeScorer({"s1": 0.9}), make_drift_check=checks)
+    with (
+        running(loop),
+        subscribed(broker) as subscriber,
+        publishing(loop, settings_for(broker, "occupancy", "control")),
+    ):
+        source.show()
+        subscriber.wait_for(lambda m: m.topic == f"{OWN}s1" and payload(m)["state"] == "occupied")
+        checks.px = 100.0
+        own = subscriber.wait_for(
+            lambda m: m.topic == f"{OWN}s1" and payload(m).get("reason") == "drift"
+        )
+        control = subscriber.wait_for(
+            lambda m: m.topic == CONTROL and payload(m).get("reason") == "drift"
+        )
+    assert payload(own) == {"state": "unknown", "reason": "drift"}
+    assert payload(control) == {"addr": "s1", "occupancy": "unknown", "reason": "drift"}
 
 
 def test_a_restarted_broker_gets_every_sensor_with_no_restart_here(

@@ -375,6 +375,16 @@ def _is_patch_part(value: Any) -> bool:
     return isinstance(value, str) and _PATCH_PART.fullmatch(value) is not None
 
 
+def _is_drift(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if "unmeasured" in value:
+        return _is_text(value["unmeasured"])
+    px: Any = value.get("px")
+    tolerance: Any = value.get("tolerance_px")
+    return _is_number(px) and _is_number(tolerance) and value.get("past") is (px > tolerance)
+
+
 def _is_l0(value: Any) -> bool:
     return (
         isinstance(value, dict)
@@ -406,6 +416,7 @@ _OPTIONAL: dict[str, Callable[[Any, set[str]], bool]] = {
         value, ("capture_ms", "decode_ms", "cut_ms", "classify_ms", "rate_fps")
     ),
     "camera": lambda value, _: _is_camera(value),
+    "drift": lambda value, _: _is_drift(value),
     "last_messages": lambda value, sensors: _by_sensor(value, sensors, _is_by_profile),
 }
 
