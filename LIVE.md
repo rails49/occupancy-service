@@ -69,7 +69,7 @@ A classifier's number for a clear sensor goes in the optional `scores`.
 
 ### Optional fields
 
-Everything except `l0` and `last_messages` comes from the served frame.
+Everything except `l0`, `drift` and `last_messages` comes from the served frame.
 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
@@ -80,6 +80,7 @@ Everything except `l0` and `last_messages` comes from the served frame.
 | `changes` | object | Sensor id to the count of L1 changes, an integer from 0. |
 | `timings` | object | Any of `capture_ms`, `decode_ms`, `cut_ms`, `classify_ms` and `rate_fps`, each a number from 0. |
 | `camera` | object | Any of `state` (`ok` or `lost`), `rate_fps` and `frame_age_ms`, the last two numbers from 0. |
+| `drift` | object | How far the camera has moved, from its own sampled frame. See [Drift](#drift). |
 | `last_messages` | object | Sensor id to profile name to `{ message, time }`: the last message that profile published for that sensor, and when. A sensor or a profile with nothing published has no entry. `message` is an object for a payload sent as JSON and a string for one sent as text. `time` has the form of `captured_at`. |
 
 `patches` maps ids to part names because a sensor id is any non-empty string, and a part name cannot carry one safely: browsers return a `"` written as `%22` as those three characters.
@@ -111,6 +112,7 @@ Content-Type: application/json
   "changes": { "C3.A": 4, "C3.B": 3 },
   "timings": { "capture_ms": 2.5, "decode_ms": 11, "cut_ms": 1.25, "classify_ms": 30, "rate_fps": 14.5 },
   "camera": { "state": "ok", "rate_fps": 15, "frame_age_ms": 20 },
+  "drift": { "px": 2, "tolerance_px": 9.75, "past": false },
   "last_messages": {
     "C3.A": {
       "occupancy": { "message": { "state": "occupied", "confidence": 0.93 }, "time": "2026-11-05T10:15:30.140Z" }
@@ -151,6 +153,36 @@ The JSON part with no frame in about 1 s:
   }
 }
 ```
+
+### Drift
+
+`drift` has one of two forms:
+
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `px` | number from 0 | How far the camera has moved since the archive's `images[0]`, in pixels of that image, not `camera.resolution`. |
+| `tolerance_px` | number from 0 | The largest reading accepted: a setting in track gauges, multiplied by the layout's DPT. |
+| `past` | boolean | Whether `px` is above `tolerance_px`. Exactly at it is not past it. |
+
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `unmeasured` | non-empty string | Why there is no reading. |
+
+While `past` is true, every sensor is `unknown` with the reason `drift`. One reading past the tolerance refuses and one within it ends the refusal, with nothing filtered across readings. With `unmeasured`, L1 goes on as if the camera had not moved. A service with the check turned off has no `drift` field and never refuses.
+
+A reading is the median over blocks of block-wise phase correlation. Both images go to Rec. 601 luma, stretched bilinearly to a working width of at most 960 px, and are cut into 128 px blocks, fewer only if the image is too small. Each block gets a Hann window, and its lag is the highest whole-pixel peak of the whitened cross-power spectrum, so a camera that has not moved reads exactly 0.
+
+#### Drift cases
+
+[`conformance/drift.json`](conformance/drift.json) holds image pairs and the reading each should give, for an implementation to run in its own tests:
+
+| Key | Holds |
+| :--- | :--- |
+| `width`, `height` | The size of every image. |
+| `images` | Image name to its pixels in base64: 8-bit gray, row by row, one byte per pixel. A value `v` is the luma `v / 255`. |
+| `cases` | A list of `{ name, reference, frame, expected_px }`, where `reference` and `frame` are names in `images`. |
+
+An implementation passes a case when it reads `expected_px` within 0.000001, with `reference` as `images[0]`. `conformance/make_drift.py` wrote the file.
 
 ## `GET <base>/events`
 
@@ -230,7 +262,7 @@ It exits non-zero and names each broken rule. It accepts an implementation that 
 
 With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. Without the flag it writes nothing.
 
-It checks format and consistency only. Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
+It checks format and consistency only, so it does not run the [drift cases](#drift-cases). Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
 
 | Rule | Broken by |
 | :--- | :--- |
@@ -265,6 +297,7 @@ It checks format and consistency only. Timing rules need control of a camera, so
 | `optional/changes` | `changes` has the wrong shape, or names a sensor not in the manifest. |
 | `optional/timings` | `timings` has the wrong shape. |
 | `optional/camera` | `camera` has the wrong shape. |
+| `optional/drift` | `drift` has the wrong shape, or `past` disagrees with `px` and `tolerance_px`. |
 | `optional/last_messages` | `last_messages` has the wrong shape, or names a sensor not in the manifest. |
 | `patches/missing-part` | `patches` names a part the answer does not have. |
 | `patches/no-filename` | A part `patches` names has no `filename`. |

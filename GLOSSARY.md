@@ -47,3 +47,6 @@ A TOML file that says how L1 goes out over MQTT: its topic, its payloads, how of
 
 **Unknown**:
 `occupancy`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/occupancy/blob/main/GLOSSARY.md).
+
+**Drift**:
+`occupancy`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/occupancy/blob/main/GLOSSARY.md).

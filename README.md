@@ -22,7 +22,7 @@ uv run live-check --save http://localhost:8000/live    # also rewrites manifest.
 
 ## L1
 
-`occupancy_service.l1` turns the newest frame into L1. It reads the archive's manifest and no image. `L1Settings` holds the archive's path, the distance from a track past which a sensor has no track (0.3 G), the time until `scoring stalled` (`stalled_after`, 1 s), and the engine, device and model, which default to onnxruntime and the model in the `rails49-classifier` wheel. `CaptureSettings` holds the time until the camera is `lost` (`lost_after`, 1 s).
+`occupancy_service.l1` turns the newest frame into L1. It reads the archive's manifest, and only the drift check reads an image. `L1Settings` holds the archive's path, the distance from a track past which a sensor has no track (0.3 G), the time until `scoring stalled` (`stalled_after`, 1 s), the [drift check](#drift)'s interval and tolerance, and the engine, device and model, which default to onnxruntime and the model in the `rails49-classifier` wheel. `CaptureSettings` holds the time until the camera is `lost` (`lost_after`, 1 s).
 
 The `openvino` engine needs the `openvino` extra (`uv sync --extra openvino`). The dev group holds it too, so the tests run it on the CPU. onnxruntime runs only on the CPU, and any other device reads `no model`.
 
@@ -30,6 +30,7 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 
 | Reason | When |
 | :--- | :--- |
+| `drift` | The newest [drift reading](#drift) is past the tolerance. This reason is on every sensor, whatever else applies to it. |
 | `archive has no id` | The manifest has no `id`. The service keeps running, so that a page can save the archive and mint one. |
 | `no model` | The model did not load. |
 | `DPT unresolved` | The calibration gives no DPT. |
@@ -40,6 +41,27 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 | `outside the frame` | The classifier returned `None` for the sensor. |
 
 **The turnout limit:** a sensor near a turnout is scored like any other, but the training data leaves such positions out, so the classifier's accuracy there is not known. The service does not detect these sensors, and reports nothing special for them.
+
+## Drift
+
+`occupancy_service.drift` measures how far the camera has moved since the archive's `images[0]`, as `@occupancy/drift` in rails49/occupancy does, on the same [shared cases](LIVE.md#drift-cases). It does not correct drift. A person puts the camera back, or authors a new archive.
+
+`L1Settings` holds the interval (`drift_every`, 3 s) and the tolerance in track gauges (`drift_tolerance_g`, 0.5 G, multiplied by the layout's DPT). `drift_tolerance_g = None` turns the check off.
+
+The check takes the newest frame on its own thread, at once and then every interval, so a slow check does not delay L1. Models and sampling keep running through a refusal, so putting the camera back ends it with no restart. One reading decides, with no filter across samples and no override.
+
+`latest` reports the reading in [`drift`](LIVE.md#drift), and every MQTT profile carries the refusal as it carries any `unknown`, so a profile's hold applies to the `clear` that follows.
+
+| `unmeasured` | When |
+| :--- | :--- |
+| `no reading yet` | The check has not read a frame yet. |
+| `no first image` | The manifest has no images, or the archive does not hold the first. |
+| `DPT unresolved` | The calibration gives no DPT. |
+| `check failed` | The first image or a frame does not decode, the first image is too small to hold a block, or the check raised. A failed first image stays so until a reload, and a failed frame until the next sample. |
+
+With any of these, L1 goes on as if the camera had not moved. A reload rebuilds the check, on the thread that samples, from the new `images[0]`. The last reading, and any refusal, stands until the next one, unless the reload leaves nothing to measure against.
+
+A reading is in pixels of the first image and DPT is in `camera.resolution` pixels, so the two compare directly only when the first image is at `camera.resolution`.
 
 ## HTTP
 
@@ -152,4 +174,4 @@ A string payload is written the same way, as `clear = "OFF {sensor}"` under `[pa
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
 
-The L1 tests use a fake capture source and the packaged model, on the CPU. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both.
+The L1 tests use a fake capture source and the packaged model, on the CPU. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both.
