@@ -4,6 +4,7 @@ import email.parser
 import http.client
 import io
 import json
+import socket
 import threading
 import time
 import zipfile
@@ -98,6 +99,61 @@ def read_latest(service: Live, query: str = "") -> Latest:
 
 def wait_until_served(service: Live, frame: Frame) -> None:
     wait_for(lambda: service.loop.latest().frame == frame)
+
+
+class EventStream:
+    """A reader of ``events`` that never blocks a test for long."""
+
+    def __init__(self, service: Live) -> None:
+        self.socket = socket.create_connection(("127.0.0.1", service.server.port), timeout=5)
+        self.socket.sendall(b"GET /live/events HTTP/1.1\r\nHost: test\r\n\r\n")
+        self.buffer = b""
+        while b"\r\n\r\n" not in self.buffer:
+            self._read()
+        head, _, self.buffer = self.buffer.partition(b"\r\n\r\n")
+        self.head = head.decode()
+
+    def _read(self) -> None:
+        data = self.socket.recv(65536)
+        assert data, "the stream ended"
+        self.buffer += data
+
+    def next_block(self) -> bytes:
+        """The next run of lines up to a blank line."""
+        while b"\n\n" not in self.buffer:
+            self._read()
+        block, _, self.buffer = self.buffer.partition(b"\n\n")
+        return block
+
+    def next_event(self) -> dict[str, Any]:
+        """The next event, passing over comment lines."""
+        while True:
+            block = self.next_block()
+            if block.startswith(b"data: "):
+                return json.loads(block.removeprefix(b"data: "))
+
+    def is_silent_for(self, seconds: float) -> bool:
+        """Whether no event, or anything else, comes in that time."""
+        self.socket.settimeout(seconds)
+        try:
+            self._read()
+        except TimeoutError:
+            return True
+        finally:
+            self.socket.settimeout(5)
+        return False
+
+    def close(self) -> None:
+        self.socket.close()
+
+
+@contextmanager
+def event_stream(service: Live) -> Iterator[EventStream]:
+    stream = EventStream(service)
+    try:
+        yield stream
+    finally:
+        stream.close()
 
 
 def folder_archive(path: Path, sensors: dict[str, tuple[float, float]] = ONE_SENSOR) -> Path:
@@ -436,3 +492,118 @@ def test_after_a_number_too_long_to_read_answers_at_once(tmp_path: Path) -> None
 
     assert "frame" in answer.parts
     assert took < 0.5
+
+
+def test_events_sends_every_sensor_on_connect_as_messages(tmp_path: Path) -> None:
+    sensors = {'say "hi"': (160.0, 120.0), "s2": (170.0, 120.0), "s3": (180.0, 120.0)}
+    archive = folder_archive(tmp_path, sensors)
+    with live(archive, {'say "hi"': 0.9, "s2": 0.1}) as service:
+        wait_until_served(service, service.source.show())
+        with event_stream(service) as stream:
+            assert "200 OK" in stream.head
+            assert "Content-Type: text/event-stream" in stream.head
+            assert "Cache-Control: no-store" in stream.head
+            assert "access-control-" not in stream.head.lower()
+            events = {event["sensor"]: event for event in (stream.next_event() for _ in range(3))}
+
+    assert events == {
+        'say "hi"': {"sensor": 'say "hi"', "state": "occupied", "confidence": 0.9},
+        "s2": {"sensor": "s2", "state": "clear"},
+        "s3": {"sensor": "s3", "state": "unknown", "reason": "outside the frame"},
+    }
+
+
+def test_events_then_sends_only_changes_and_none_for_a_new_confidence(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path), {"s1": 0.9}) as service:
+        wait_until_served(service, service.source.show())
+        with event_stream(service) as stream:
+            assert stream.next_event()["state"] == "occupied"
+
+            service.scorer.scores = {"s1": 0.8}  # A new confidence, and the same state.
+            frame = service.source.show()
+            wait_until_served(service, frame)
+            assert read_latest(service).fields["l1"]["s1"]["confidence"] == 0.8
+            assert stream.is_silent_for(0.2)
+
+            service.scorer.scores = {"s1": 0.1}  # A new state.
+            service.source.show()
+            assert stream.next_event() == {"sensor": "s1", "state": "clear"}
+
+            service.source.state = "lost"  # A new reason.
+            assert stream.next_event() == {
+                "sensor": "s1",
+                "state": "unknown",
+                "reason": "no frames",
+            }
+
+
+def test_events_sends_a_comment_line_every_so_often(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path), comment_every=0.05) as service:
+        wait_until_served(service, service.source.show())
+        with event_stream(service) as stream:
+            stream.next_event()
+            assert stream.next_block().startswith(b":")
+            assert stream.next_block().startswith(b":")
+
+
+def test_comments_come_every_15_seconds_by_default() -> None:
+    assert ServerSettings().comment_every == 15
+
+
+def test_a_stalled_client_is_dropped_without_holding_up_others_or_the_loop(tmp_path: Path) -> None:
+    # Long ids make each event big, so a client that does not read soon fills its socket.
+    ids = [f"{n}-{'x' * 4000}" for n in range(20)]
+    sensors = {id: (160.0, 120.0) for id in ids}
+    occupied = dict.fromkeys(ids, 0.9)
+    clear = dict.fromkeys(ids, 0.1)
+    archive = folder_archive(tmp_path, sensors)
+    with live(archive, occupied, write_timeout=0.2) as service:
+        wait_until_served(service, service.source.show())
+        stalled = socket.socket()
+        stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        stalled.connect(("127.0.0.1", service.server.port))
+        stalled.sendall(b"GET /live/events HTTP/1.1\r\nHost: test\r\n\r\n")
+        with event_stream(service) as reader:
+            for _ in ids:
+                reader.next_event()
+            # Each flip is 20 events of 4 kB, so 200 flips are far more than any socket holds.
+            for flip in range(200):
+                service.scorer.scores = clear if flip % 2 == 0 else occupied
+                start = time.monotonic()
+                wait_until_served(service, service.source.show())
+                assert time.monotonic() - start < 1, "the scoring loop was held up"
+                expected = "clear" if flip % 2 == 0 else "occupied"
+                states = [reader.next_event()["state"] for _ in ids]
+                assert states == [expected] * len(ids), "the other client was held up"
+
+        # What the server had sent is still there to read, and then the stream ends.
+        stalled.settimeout(5)
+        received = 0
+        while chunk := read_or_reset(stalled):
+            received += len(chunk)
+        stalled.close()
+
+    assert received < 200 * 20 * 4000
+
+
+def read_or_reset(connection: socket.socket) -> bytes:
+    """What ``recv`` gives, with a connection reset read as the stream's end."""
+    try:
+        return connection.recv(65536)
+    except ConnectionResetError:
+        return b""
+
+
+def test_a_client_with_too_many_changes_waiting_is_dropped(tmp_path: Path) -> None:
+    ids = [f"s{n}" for n in range(20)]
+    sensors = {id: (160.0, 120.0) for id in ids}
+    occupied = dict.fromkeys(ids, 0.9)
+    archive = folder_archive(tmp_path, sensors)
+    with live(archive, occupied, max_backlog=0) as service:
+        wait_until_served(service, service.source.show())
+        with event_stream(service) as stream:
+            service.scorer.scores = dict.fromkeys(ids, 0.1)
+            wait_until_served(service, service.source.show())  # 20 changes at one moment.
+            with pytest.raises(AssertionError, match="the stream ended"):
+                while True:
+                    stream.next_block()
