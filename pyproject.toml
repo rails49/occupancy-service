@@ -7,6 +7,7 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.3",
+    "paho-mqtt>=2.1",
     "pillow>=12.0",
     # Pinned: l1.py wraps a private attribute to time the cut and the model apart.
     "rails49-classifier==0.1.0",

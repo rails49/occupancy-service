@@ -2,21 +2,26 @@
 
 import logging
 import math
+import secrets
 import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
+
+from paho.mqtt import client as paho
+from paho.mqtt.enums import CallbackAPIVersion, MQTTErrorCode
+from paho.mqtt.properties import Properties
+from paho.mqtt.reasoncodes import ReasonCode
 
 from occupancy_service.l1 import L1Entry, L1Result, L1Subscription
-from occupancy_service.mqtt import MqttClient
 from occupancy_service.profile import Message, Profile, ProfileError, encode, load_profile
 
 _log = logging.getLogger(__name__)
 
 _WAKE = 0.05  # Seconds at most between looks at the broker and at stop().
-_JOIN_WAIT = 10.0  # Seconds stop() waits: each socket call on the thread has its own timeout.
+_JOIN_WAIT = 10.0  # Seconds stop() waits: connecting has its own timeout.
 _STOPPED = L1Entry("unknown", reason="service stopped")
 
 
@@ -25,14 +30,14 @@ class PublisherSettings:
     """The broker, with no authentication, and the active profiles: each a shipped profile's name
     or a path to a file. A lost broker is tried again every ``retry_every`` seconds.
 
-    ``keepalive`` is the seconds promised to the broker, and ``timeout`` bounds connecting and each
-    write. How often a profile repeats is that profile's ``repeat``.
+    ``keepalive`` is the seconds promised to the broker, and ``timeout`` bounds connecting. How
+    often a profile repeats is that profile's ``repeat``.
     """
 
     host: str = "localhost"
     port: int = 1883
     profiles: tuple[str, ...] = ("occupancy",)
-    retry_every: float = 1.0
+    retry_every: int = 1
     keepalive: int = 30
     timeout: float = 2.0
 
@@ -54,7 +59,8 @@ class ResultSource(Protocol):
 
 
 class Publisher:
-    """One connection for all profiles, on its own thread, which reconnects for as long as it runs.
+    """One connection for all profiles. paho's thread keeps it up and reconnects, and this class's
+    own thread does the sending.
 
     It keeps no result: each message comes from ``latest()``, or from a change it has just been
     told of, so a reload needs no restart and a repeat is as fresh as ``latest()``.
@@ -72,6 +78,8 @@ class Publisher:
         self._last: dict[str, dict[str, LastMessage]] = {}
         self._refused: set[tuple[str, str]] = set()
         self._stopping = threading.Event()
+        self._connected = threading.Event()  # Set by each new connection, for _run to take.
+        self._log_connect_failure = True  # Once for each time the broker is out of reach.
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -92,49 +100,79 @@ class Publisher:
             return {sensor: dict(by_profile) for sensor, by_profile in self._last.items()}
 
     def _run(self) -> None:
+        settings = self._settings
         subscription = self._source.subscribe()
+        client = paho.Client(
+            CallbackAPIVersion.VERSION2,
+            client_id=f"occupancy-service-{secrets.token_hex(4)}",
+            protocol=paho.MQTTv311,
+        )
+        client.on_connect = self._on_connect
+        client.on_connect_fail = self._on_connect_fail
+        client.on_disconnect = self._on_disconnect
+        client.connect_timeout = settings.timeout
+        client.reconnect_delay_set(settings.retry_every, settings.retry_every)
+        client.connect_async(settings.host, settings.port, settings.keepalive)
+        client.loop_start()
         try:
-            was_connected = True  # So that a broker that is down at startup is logged.
             while not self._stopping.is_set():
-                _discard(subscription)  # The connection starts by sending every sensor.
-                client = self._connect(was_connected)
-                was_connected = client is not None
-                if client is None:
-                    self._stopping.wait(self._settings.retry_every)
-                    continue
-                try:
+                if self._connected.wait(_WAKE):
+                    self._connected.clear()
+                    _discard(subscription)  # The connection starts by sending every sensor.
                     self._serve(client, subscription)
-                    self._send_all(client, self._profiles, stopping=True)
-                    client.disconnect()
-                except OSError as error:
-                    _log.warning("lost the broker: %s", error)
-                finally:
-                    client.close()
+            if client.is_connected():
+                self._send_all(client, self._profiles, stopping=True)
+            client.disconnect()
+            client.loop_stop()
         finally:
             subscription.close()
 
-    def _connect(self, log_failure: bool) -> MqttClient | None:
+    def _on_connect(
+        self,
+        client: paho.Client,
+        userdata: Any,
+        flags: paho.ConnectFlags,
+        reason_code: ReasonCode,
+        properties: Properties | None,
+    ) -> None:
+        if reason_code.is_failure:
+            _log.warning("the broker refused the connection: %s", reason_code)
+            return
         settings = self._settings
-        try:
-            client = MqttClient(settings.host, settings.port, settings.keepalive, settings.timeout)
-        except OSError as error:
-            if log_failure:
-                _log.warning(
-                    "cannot reach the broker at %s:%s, and will keep trying: %s",
-                    settings.host,
-                    settings.port,
-                    error,
-                )
-            return None
         _log.info("connected to the broker at %s:%s", settings.host, settings.port)
-        return client
+        self._log_connect_failure = True
+        self._connected.set()
 
-    def _serve(self, client: MqttClient, subscription: L1Subscription) -> None:
-        """Every sensor now and on each repeat, and each change as it comes, until ``stop()``."""
+    def _on_connect_fail(self, client: paho.Client, userdata: Any) -> None:
+        if self._log_connect_failure:
+            self._log_connect_failure = False
+            settings = self._settings
+            _log.warning(
+                "cannot reach the broker at %s:%s, and will keep trying",
+                settings.host,
+                settings.port,
+            )
+
+    def _on_disconnect(
+        self,
+        client: paho.Client,
+        userdata: Any,
+        flags: paho.DisconnectFlags,
+        reason_code: ReasonCode,
+        properties: Properties | None,
+    ) -> None:
+        if not self._stopping.is_set():
+            _log.warning("lost the broker: %s", reason_code)
+
+    def _serve(self, client: paho.Client, subscription: L1Subscription) -> None:
+        """Every sensor now and on each repeat, and each change as it comes, until ``stop()``, the
+        connection ends, or a new one has replaced it."""
         self._send_all(client, self._profiles)
         now = time.monotonic()
         due = {profile.name: now + profile.repeat for profile in self._profiles}
-        while not self._stopping.is_set():
+        while (
+            not self._stopping.is_set() and not self._connected.is_set() and client.is_connected()
+        ):
             next_due = min(due.values(), default=math.inf)
             change = subscription.get(max(min(_WAKE, next_due - time.monotonic()), 0))
             if change is not None:
@@ -142,7 +180,6 @@ class Publisher:
                 if change.sensor in result.l1:  # Otherwise a reload has just removed it.
                     for profile in self._profiles:
                         self._send(client, profile, change.sensor, change.entry, result.archive_id)
-            client.poll()
             now = time.monotonic()
             repeating = [profile for profile in self._profiles if due[profile.name] <= now]
             if repeating:
@@ -153,7 +190,7 @@ class Publisher:
                 due[profile.name] = next_at if next_at > now else now + profile.repeat
 
     def _send_all(
-        self, client: MqttClient, profiles: list[Profile], stopping: bool = False
+        self, client: paho.Client, profiles: list[Profile], stopping: bool = False
     ) -> None:
         """Every sensor in the newest result, on ``profiles``."""
         result = self._source.latest()
@@ -165,7 +202,7 @@ class Publisher:
 
     def _send(
         self,
-        client: MqttClient,
+        client: paho.Client,
         profile: Profile,
         sensor: str,
         entry: L1Entry,
@@ -184,7 +221,9 @@ class Publisher:
                 )
             return
         message = profile.message_for(sensor, entry)
-        client.publish(topic, encode(message), profile.qos, profile.retain)
+        sent = client.publish(topic, encode(message), profile.qos, profile.retain)
+        if sent.rc != MQTTErrorCode.MQTT_ERR_SUCCESS:
+            return  # The connection has just ended, and the next one sends every sensor.
         with self._lock:
             by_profile = self._last.setdefault(sensor, {})
             by_profile[profile.name] = LastMessage(message, datetime.now(UTC))
