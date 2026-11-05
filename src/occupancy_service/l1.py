@@ -24,7 +24,6 @@ from occupancy_service.capture import CaptureStatus, Frame
 
 _log = logging.getLogger(__name__)
 
-_STALLED_AFTER = 1.0  # Seconds with the camera fine and no new result until scoring has stalled.
 _POLL = 0.01  # Seconds between looks for a new frame.
 _WATCH_EVERY = 0.05  # Seconds between looks for a change that no new result brings.
 _RATE_WINDOW = 2.0  # Seconds of results the overall rate is measured over.
@@ -45,6 +44,7 @@ _NO_ARCHIVE_ID = "archive has no id"
 class L1Settings:
     """``archive`` is what ``r49.load`` takes as a path. A sensor farther than ``no_track_limit_g``
     gauges from every track is ``unknown``. ``device`` is as ``classifier.Classifier`` takes it.
+    Scoring has stalled after ``stalled_after`` seconds with the camera fine and no new result.
     """
 
     archive: str | os.PathLike[str]
@@ -52,6 +52,7 @@ class L1Settings:
     engine: Engine = "onnxruntime"
     device: str = "CPU"
     model: Path = classifier.MODEL
+    stalled_after: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -472,7 +473,7 @@ class L1Loop:
         threshold = self._scorer.threshold if self._scorer is not None else None
         if self._camera_ok_since is None:
             live_reason = _NO_FRAMES
-        elif now - max(self._camera_ok_since, self._scored_at) > _STALLED_AFTER:
+        elif now - max(self._camera_ok_since, self._scored_at) > self._settings.stalled_after:
             live_reason = _SCORING_STALLED
         elif scored is None:
             live_reason = _NO_FRAMES  # The camera has just come back: there is no result yet.

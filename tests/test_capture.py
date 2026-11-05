@@ -163,6 +163,16 @@ def test_status_is_lost_about_1_s_after_frames_stop_while_the_fake_is_hung(tmp_p
     assert status.rate_fps == 0
 
 
+def test_the_time_until_lost_is_a_setting(tmp_path: Path) -> None:
+    fake = install(tmp_path, [send(noise_jpeg()), HANG])
+    with capturing(fake, hang_limit=60, lost_after=0.2) as capture:
+        wait_for(capture.latest)
+        arrived = time.monotonic()
+        wait_for(lambda: capture.status().state == "lost")
+        waited = time.monotonic() - arrived
+    assert waited < 0.7
+
+
 def test_a_hung_fake_is_killed_at_the_hang_limit_and_frames_resume(tmp_path: Path) -> None:
     before, after = noise_jpeg(), noise_jpeg()
     fake = install(tmp_path, [send(before), HANG], [stream(after)])
