@@ -6,9 +6,12 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+    "numpy>=2.3",
     "pillow>=12.0",
+    # Pinned: l1.py wraps a private attribute to time the cut and the model apart.
+    "rails49-classifier==0.1.0",
     # Pinned to one version: org ADR 0022.
-    "rails49-r49==0.2.0",
+    "rails49-r49==0.3.0",
 ]
 
 [project.scripts]
