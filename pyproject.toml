@@ -1,0 +1,39 @@
+[project]
+name = "occupancy-service"
+version = "0.1.0"
+description = "Takes one archive and one camera, and publishes each sensor's occupancy"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "pillow>=12.0",
+    # Pinned to one version: org ADR 0022.
+    "rails49-r49==0.2.0",
+]
+
+[project.scripts]
+live-check = "occupancy_service.live_check:main"
+
+[dependency-groups]
+dev = ["black>=25.1", "pyright>=1.1.400", "pytest>=8.3", "ruff>=0.11"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/occupancy_service"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"

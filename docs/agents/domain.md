@@ -2,6 +2,8 @@
 
 How the engineering skills should consume this repo's domain documentation when exploring the codebase.
 
+What each kind of doc holds, and how ADRs change, is set by org [ADR-0021](https://github.com/rails49/.github/blob/main/docs/adr/0021-each-fact-has-one-owner-and-the-glossary-is-glossary-md.md).
+
 ## Before exploring, read these
 
 - **`GLOSSARY.md`** at the repo root, or
