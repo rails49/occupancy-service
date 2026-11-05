@@ -1,0 +1,16 @@
+# This service's own vocabulary: one topic per sensor, with the L1 entry LIVE.md describes.
+topic = "occupancy/{archive_id}/sensor/{sensor}"
+retain = false
+qos = 0
+repeat = 1
+
+[payload.occupied]
+state = "occupied"
+confidence = "{confidence}"
+
+[payload.clear]
+state = "clear"
+
+[payload.unknown]
+state = "unknown"
+reason = "{reason}"
