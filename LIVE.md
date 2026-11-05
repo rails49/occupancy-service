@@ -19,8 +19,7 @@ Nothing here is a safety interlock.
 | `GET <base>/latest` | yes | The latest frame and its L1 |
 | `GET <base>/events` | yes | Every L1 change |
 | `<base>/archive/` | yes | The archive |
-
-Saving back to the archive is optional. rails49/occupancy-service#7 defines it.
+| `PUT` and `DELETE` under `<base>/archive/` | no | [Saving](#saving) back to the archive |
 
 MQTT is not in the contract. The [README](README.md#mqtt) documents the profiles.
 
@@ -70,7 +69,7 @@ A classifier's number for a clear sensor goes in the optional `scores`.
 
 ### Optional fields
 
-Everything except `l0` and `last_messages` comes from the served frame.
+Everything except `l0`, `drift` and `last_messages` comes from the served frame.
 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
@@ -81,6 +80,7 @@ Everything except `l0` and `last_messages` comes from the served frame.
 | `changes` | object | Sensor id to the count of L1 changes, an integer from 0. |
 | `timings` | object | Any of `capture_ms`, `decode_ms`, `cut_ms`, `classify_ms` and `rate_fps`, each a number from 0. |
 | `camera` | object | Any of `state` (`ok` or `lost`), `rate_fps` and `frame_age_ms`, the last two numbers from 0. |
+| `drift` | object | How far the camera has moved, from its own sampled frame. See [Drift](#drift). |
 | `last_messages` | object | Sensor id to profile name to `{ message, time }`: the last message that profile published for that sensor, and when. A sensor or a profile with nothing published has no entry. `message` is an object for a payload sent as JSON and a string for one sent as text. `time` has the form of `captured_at`. |
 
 `patches` maps ids to part names because a sensor id is any non-empty string, and a part name cannot carry one safely: browsers return a `"` written as `%22` as those three characters.
@@ -112,6 +112,7 @@ Content-Type: application/json
   "changes": { "C3.A": 4, "C3.B": 3 },
   "timings": { "capture_ms": 2.5, "decode_ms": 11, "cut_ms": 1.25, "classify_ms": 30, "rate_fps": 14.5 },
   "camera": { "state": "ok", "rate_fps": 15, "frame_age_ms": 20 },
+  "drift": { "px": 2, "tolerance_px": 9.75, "past": false },
   "last_messages": {
     "C3.A": {
       "occupancy": { "message": { "state": "occupied", "confidence": 0.93 }, "time": "2026-11-05T10:15:30.140Z" }
@@ -153,6 +154,36 @@ The JSON part with no frame in about 1 s:
 }
 ```
 
+### Drift
+
+`drift` has one of two forms:
+
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `px` | number from 0 | How far the camera has moved since the archive's `images[0]`, in pixels of that image, not `camera.resolution`. |
+| `tolerance_px` | number from 0 | The largest reading accepted: a setting in track gauges, multiplied by the layout's DPT. |
+| `past` | boolean | Whether `px` is above `tolerance_px`. Exactly at it is not past it. |
+
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `unmeasured` | non-empty string | Why there is no reading. |
+
+While `past` is true, every sensor is `unknown` with the reason `drift`. One reading past the tolerance refuses and one within it ends the refusal, with nothing filtered across readings. With `unmeasured`, L1 goes on as if the camera had not moved. A service with the check turned off has no `drift` field and never refuses.
+
+A reading is the median over blocks of block-wise phase correlation. Both images go to Rec. 601 luma, stretched bilinearly to a working width of at most 960 px, and are cut into 128 px blocks, fewer only if the image is too small. Each block gets a Hann window, and its lag is the highest whole-pixel peak of the whitened cross-power spectrum, so a camera that has not moved reads exactly 0.
+
+#### Drift cases
+
+[`conformance/drift.json`](conformance/drift.json) holds image pairs and the reading each should give, for an implementation to run in its own tests:
+
+| Key | Holds |
+| :--- | :--- |
+| `width`, `height` | The size of every image. |
+| `images` | Image name to its pixels in base64: 8-bit gray, row by row, one byte per pixel. A value `v` is the luma `v / 255`. |
+| `cases` | A list of `{ name, reference, frame, expected_px }`, where `reference` and `frame` are names in `images`. |
+
+An implementation passes a case when it reads `expected_px` within 0.000001, with `reference` as `images[0]`. `conformance/make_drift.py` wrote the file.
+
 ## `GET <base>/events`
 
 Server-Sent Events: every sensor's state on connect, then each change. Each event is one sensor's [L1 entry](#l1-entry) with its id in `sensor`, as a message with no `event` field, so `EventSource.onmessage` sees it.
@@ -177,6 +208,48 @@ data: {"sensor": "C3.B", "state": "unknown", "reason": "no frames"}
 
 Serves the archive in the URL form of rails49/r49#60: `<base>/archive/manifest.json` and `<base>/archive/<filename>`. `manifest.json` has the content type `application/json`.
 
+## Saving
+
+Saving back to the archive is optional. A service offers it when the archive is a folder it can write to. `GET <base>/archive/manifest.json` then carries a strong `ETag`: the SHA-256 of the file's bytes, in hex, in double quotes.
+
+With no `ETag`, as with a zip or a read-only folder, `PUT` and `DELETE` answer 405 with `Allow: GET`.
+
+A page writes the images, then the manifest, then deletes the images it removed. It sends the `ETag` it read in `If-Match` each time, and takes the new one from the manifest's answer.
+
+### Every write
+
+Under `<base>/archive/<path>`, checked in this order:
+
+| Status | When |
+| :--- | :--- |
+| 403 | The `Origin` is foreign, by the rule in [control's ADR-0057](https://github.com/rails49/control/blob/main/docs/adr/0057-one-origin-rule-and-both-faces-read-it.md). No `Origin` passes. |
+| 428 | There is no `If-Match`. |
+| 412 | `If-Match` is anything but the current manifest's `ETag`. |
+| 404 | `manifest/filename` refuses the name, or a segment starts with a dot. Names are percent-decoded as on `GET`. |
+| 411 | A `PUT` has no `Content-Length`. |
+
+### Routes
+
+| Route | Answer |
+| :--- | :--- |
+| `PUT <filename>` | 204. Stores the image, creating folders as needed, and replaces a file already there. 409 if a folder is at that name, or a file on the way to it. |
+| `PUT manifest.json` | 204 with the new `ETag`. 422 with the rule in a JSON `error` field if it is refused, as below. |
+| `DELETE <filename>` | 204. 409 if the manifest still names the file, or the name is `manifest.json`. 404 if there is no such file. |
+
+| `error` | A manifest is refused because |
+| :--- | :--- |
+| A rule of [r49's FORMAT.md](https://github.com/rails49/r49/blob/main/FORMAT.md) | `parse_manifest` refuses it, under that rule. |
+| `images/missing` | It names an image that is absent. |
+| `manifest/id` | It changes or removes an `id` the archive has. |
+
+### After a save
+
+- Of two saves from one copy, one succeeds and the other gets 412.
+- A failed write leaves the old file in place. A crash or a refused save may leave an image no manifest names, which a reader reports as an orphan, and which does no harm.
+- The next frame scored uses the new manifest. A sensor that stays gets no `unknown` from the save.
+- `events` clients are closed at the first result under the new manifest. A reader treats a connect as the full list of sensors.
+- The service does not watch the folder. A hand edit takes effect at restart, and a page holding the earlier copy is refused.
+
 ## Conformance
 
 One command checks a running implementation against this document:
@@ -187,7 +260,9 @@ uvx --from git+https://github.com/rails49/occupancy-service live-check <base>
 
 It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. If it cannot read the manifest it stops there, because the other rules need it.
 
-It checks format and consistency only. Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
+With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. Without the flag it writes nothing.
+
+It checks format and consistency only, so it does not run the [drift cases](#drift-cases). Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
 
 | Rule | Broken by |
 | :--- | :--- |
@@ -222,6 +297,7 @@ It checks format and consistency only. Timing rules need control of a camera, so
 | `optional/changes` | `changes` has the wrong shape, or names a sensor not in the manifest. |
 | `optional/timings` | `timings` has the wrong shape. |
 | `optional/camera` | `camera` has the wrong shape. |
+| `optional/drift` | `drift` has the wrong shape, or `past` disagrees with `px` and `tolerance_px`. |
 | `optional/last_messages` | `last_messages` has the wrong shape, or names a sensor not in the manifest. |
 | `patches/missing-part` | `patches` names a part the answer does not have. |
 | `patches/no-filename` | A part `patches` names has no `filename`. |
@@ -231,5 +307,12 @@ It checks format and consistency only. Timing rules need control of a camera, so
 | `events/data` | An event's data is not a JSON object with a non-empty `sensor`. |
 | `events/extra-sensor` | An event names a sensor not in the manifest. |
 | `events/missing-sensor` | A sensor in the manifest has no state on connecting. |
+| `save/not-offered` | With `--save` and no `ETag`, a write does not answer 405 with `Allow: GET`. |
+| `save/etag` | With `--save`, the `ETag` is not the SHA-256 of the manifest's bytes in double quotes. |
+| `save/if-match-missing` | With `--save`, a save with no `If-Match` does not answer 428. |
+| `save/if-match-stale` | With `--save`, a save with another `If-Match` does not answer 412. |
+| `save/origin` | With `--save`, a save with a foreign `Origin` does not answer 403. |
+| `save/manifest-refused` | With `--save`, a manifest with no version does not answer 422 with a JSON `error` field. |
+| `save/rewrite` | With `--save`, a rewrite of the same bytes does not answer 204 with the same `ETag`. |
 
 An event breaks the `l1/` rules as an entry in `latest` does.

@@ -1,6 +1,7 @@
 """Check a running implementation against LIVE.md. Format and consistency only."""
 
 import argparse
+import hashlib
 import io
 import json
 import re
@@ -22,6 +23,8 @@ from PIL import Image, UnidentifiedImageError
 
 _TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
 _PATCH_PART = re.compile(r"patch-\d+")
+_FOREIGN_ORIGIN = "http://live-check.invalid"
+_ABSENT_FILE = "live-check-absent.jpg"
 
 
 @dataclass(frozen=True)
@@ -46,8 +49,11 @@ class _Broken(Exception):
         self.failure = Failure(rule, message)
 
 
-def check(base_url: str, timeout: float = 10) -> list[Failure]:
-    """Every rule the implementation at ``base_url`` breaks. Empty when it conforms."""
+def check(base_url: str, timeout: float = 10, save: bool = False) -> list[Failure]:
+    """Every rule the implementation at ``base_url`` breaks. Empty when it conforms.
+
+    Only with ``save`` does this write, and then only ``manifest.json``, with the bytes it holds.
+    """
     base = base_url.rstrip("/")
     manifest, failures = _read_manifest(f"{base}/archive/manifest.json", timeout)
     if manifest is None:
@@ -73,6 +79,8 @@ def check(base_url: str, timeout: float = 10) -> list[Failure]:
         if "patches" in with_patches and after.get("frame_id") and "patches" not in after:
             failures.append(Failure("patches/after", "patches=1 stops working alongside after"))
     failures.extend(_events_failures(f"{base}/events", sensors, timeout))
+    if save:
+        failures.extend(_save_failures(f"{base}/archive", timeout))
     return list(dict.fromkeys(failures))
 
 
@@ -254,6 +262,76 @@ def _events_failures(url: str, sensors: set[str], timeout: float) -> Iterator[Fa
         yield Failure("events/missing-sensor", f"no state for {sensor!r} on connecting")
 
 
+def _save_failures(archive: str, timeout: float) -> list[Failure]:
+    """What is wrong with saving, or with not offering it, by what the manifest's answer says."""
+    url = f"{archive}/manifest.json"
+    try:
+        _, headers, body = _send("GET", url, timeout)
+        etag = headers.get("ETag")
+        if etag is None:
+            return _not_offered_failures(archive, body, timeout)
+        return _offered_failures(url, etag, body, timeout)
+    except _Broken as broken:
+        return [broken.failure]
+
+
+def _not_offered_failures(archive: str, manifest: bytes, timeout: float) -> list[Failure]:
+    failures = []
+    writes = [
+        ("PUT", f"{archive}/manifest.json", manifest),
+        ("DELETE", f"{archive}/{_ABSENT_FILE}", None),
+    ]
+    for method, url, data in writes:
+        status, headers, _ = _send(method, url, timeout, data)
+        if status != 405 or headers.get("Allow") != "GET":
+            message = f"with no ETag, {method} answered {status}, Allow {headers.get('Allow')!r}"
+            failures.append(Failure("save/not-offered", message))
+    return failures
+
+
+def _offered_failures(url: str, etag: str, manifest: bytes, timeout: float) -> list[Failure]:
+    """Each refusal, on the manifest's own bytes while a service that wrongly takes them comes to
+    no harm. A service that takes the one manifest that is not those gets them back."""
+    failures = []
+    expected = f'"{hashlib.sha256(manifest).hexdigest()}"'
+    if etag != expected:
+        failures.append(Failure("save/etag", f"the ETag is {etag}, and the bytes make {expected}"))
+
+    def refused(rule: str, status: int, want: int, how: str) -> None:
+        if status != want:
+            failures.append(Failure(rule, f"{how} answered {status}, not {want}"))
+
+    no_match = _send("PUT", url, timeout, manifest)[0]
+    refused("save/if-match-missing", no_match, 428, "a save with no If-Match")
+    stale = _send("PUT", url, timeout, manifest, {"If-Match": '"live-check-stale"'})[0]
+    refused("save/if-match-stale", stale, 412, "a save with another If-Match")
+    foreign = _send("PUT", url, timeout, manifest, {"If-Match": etag, "Origin": _FOREIGN_ORIGIN})[0]
+    refused("save/origin", foreign, 403, "a save with a foreign Origin")
+
+    status, headers, body = _send("PUT", url, timeout, b"{}", {"If-Match": etag})
+    refused("save/manifest-refused", status, 422, "a save of a manifest with no version")
+    if status == 422 and not _has_error_field(body):
+        failures.append(Failure("save/manifest-refused", "a 422 has no JSON error field"))
+    if 200 <= status < 300:
+        written = headers.get("ETag") or f'"{hashlib.sha256(b"{}").hexdigest()}"'
+        _send("PUT", url, timeout, manifest, {"If-Match": written})
+
+    status, headers, _ = _send("PUT", url, timeout, manifest, {"If-Match": etag})
+    refused("save/rewrite", status, 204, "a rewrite of the same bytes")
+    if status == 204 and headers.get("ETag") != etag:
+        message = f"a rewrite of the same bytes gave the ETag {headers.get('ETag')}, not {etag}"
+        failures.append(Failure("save/rewrite", message))
+    return failures
+
+
+def _has_error_field(body: bytes) -> bool:
+    try:
+        answer = _parse_json(body)
+    except ValueError:
+        return False
+    return isinstance(answer, dict) and _is_text(answer.get("error"))
+
+
 def _event_data(lines: Iterable[bytes], deadline: float) -> Iterator[bytes]:
     """The data of each event ``EventSource.onmessage`` would see, until ``deadline``."""
     data: list[bytes] = []
@@ -297,6 +375,16 @@ def _is_patch_part(value: Any) -> bool:
     return isinstance(value, str) and _PATCH_PART.fullmatch(value) is not None
 
 
+def _is_drift(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if "unmeasured" in value:
+        return _is_text(value["unmeasured"])
+    px: Any = value.get("px")
+    tolerance: Any = value.get("tolerance_px")
+    return _is_number(px) and _is_number(tolerance) and value.get("past") is (px > tolerance)
+
+
 def _is_l0(value: Any) -> bool:
     return (
         isinstance(value, dict)
@@ -328,6 +416,7 @@ _OPTIONAL: dict[str, Callable[[Any, set[str]], bool]] = {
         value, ("capture_ms", "decode_ms", "cut_ms", "classify_ms", "rate_fps")
     ),
     "camera": lambda value, _: _is_camera(value),
+    "drift": lambda value, _: _is_drift(value),
     "last_messages": lambda value, sensors: _by_sensor(value, sensors, _is_by_profile),
 }
 
@@ -360,6 +449,24 @@ def _get(url: str, timeout: float) -> tuple[int, Message, bytes]:
         return error.code, error.headers, b""
     except (OSError, HTTPException) as error:
         raise _Broken("http/unreachable", f"GET {url} failed: {error}") from None
+
+
+def _send(
+    method: str,
+    url: str,
+    timeout: float,
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Message, bytes]:
+    """Any answer at all, with its body, a refusal's too."""
+    request = urllib.request.Request(url, data, headers or {}, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.headers, response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.headers, error.read()
+    except (OSError, HTTPException) as error:
+        raise _Broken("http/unreachable", f"{method} {url} failed: {error}") from None
 
 
 def _parse_json(data: bytes) -> Any:
@@ -396,7 +503,13 @@ def main(argv: list[str] | None = None) -> None:
         prog="live-check", description="Check a running implementation against LIVE.md."
     )
     parser.add_argument("base_url", help="the URL that latest, events and archive/ sit under")
-    failures = check(parser.parse_args(argv).base_url)
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="also check saving, which rewrites manifest.json with the bytes it holds",
+    )
+    args = parser.parse_args(argv)
+    failures = check(args.base_url, save=args.save)
     for failure in failures:
         print(f"{failure.rule}: {failure.message}")
     if failures:

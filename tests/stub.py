@@ -1,6 +1,7 @@
 """A small implementation of LIVE.md to run the checker against. A test changes
 what it serves through the fields of ``Stub``, to make it conform or break."""
 
+import hashlib
 import io
 import json
 import threading
@@ -99,6 +100,20 @@ class Stub:
     repeat_events: bool = False
     not_found: set[str] = field(default_factory=set)
     requests: list[str] = field(default_factory=list)
+    offers_saving: bool = False
+    checks_if_match: bool = True
+    checks_origin: bool = True
+    checks_manifest: bool = True
+    wrong_etag: str | None = None
+    no_error_field: bool = False
+    rewrite_fails: bool = False
+    not_offered_status: int = 405
+    not_offered_allow: str | None = "GET"
+    writes: list[bytes] = field(default_factory=list)
+
+    @property
+    def etag(self) -> str:
+        return self.wrong_etag or f'"{hashlib.sha256(self.manifest).hexdigest()}"'
 
     def multipart(self, patches: bool) -> bytes:
         if self.raw_latest is not None:
@@ -142,9 +157,70 @@ def serving(stub: Stub) -> Iterator[str]:
             elif path == "/base/events":
                 self.reply_events()
             elif path == "/base/archive/manifest.json":
-                self.reply(stub.manifest, stub.manifest_type)
+                self.reply_manifest()
             else:
                 self.send_error(404)
+
+        def do_PUT(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if not stub.offers_saving:
+                self.not_offered()
+                return
+            if_match = self.headers.get("If-Match")
+            if stub.checks_origin and self.headers.get("Origin") == "http://live-check.invalid":
+                self.status(403)
+            elif stub.checks_if_match and if_match is None:
+                self.status(428)
+            elif stub.checks_if_match and if_match != stub.etag:
+                self.status(412)
+            elif stub.checks_manifest and self.refuse_manifest(body):
+                pass
+            elif stub.rewrite_fails:
+                self.status(500)
+            else:
+                stub.manifest = body
+                stub.writes.append(body)
+                self.send_response(204)
+                self.send_header("ETag", stub.etag)
+                self.end_headers()
+
+        def do_DELETE(self) -> None:
+            self.not_offered()
+
+        def not_offered(self) -> None:
+            self.send_response(stub.not_offered_status)
+            if stub.not_offered_allow is not None:
+                self.send_header("Allow", stub.not_offered_allow)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def refuse_manifest(self, body: bytes) -> bool:
+            try:
+                r49.parse_manifest(body)
+            except r49.R49Error as error:
+                answer = (
+                    b"{}" if stub.no_error_field else json.dumps({"error": error.rule}).encode()
+                )
+                self.send_response(422)
+                self.send_header("Content-Length", str(len(answer)))
+                self.end_headers()
+                self.wfile.write(answer)
+                return True
+            return False
+
+        def status(self, code: int) -> None:
+            self.send_response(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def reply_manifest(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", stub.manifest_type)
+            self.send_header("Content-Length", str(len(stub.manifest)))
+            if stub.offers_saving:
+                self.send_header("ETag", stub.etag)
+            self.end_headers()
+            self.wfile.write(stub.manifest)
 
         def reply_events(self) -> None:
             lines = [f"data: {json.dumps(event)}\n\n" for event in stub.events]

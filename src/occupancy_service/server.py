@@ -9,8 +9,9 @@ import secrets
 import socket
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from email.message import Message
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -21,8 +22,12 @@ import numpy.typing as npt
 import r49
 from PIL import Image
 
+from occupancy_service.archive_writer import MANIFEST as _MANIFEST
+from occupancy_service.archive_writer import ArchiveWriter, Refused, can_name, etag_of
 from occupancy_service.capture import CaptureStatus, Frame
+from occupancy_service.drift import DriftReading, DriftUnmeasured
 from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Stats
+from occupancy_service.origin import is_own_page
 from occupancy_service.publisher import LastMessage
 
 _log = logging.getLogger(__name__)
@@ -31,12 +36,12 @@ _BASE = "/live"
 _LATEST = f"{_BASE}/latest"
 _EVENTS = f"{_BASE}/events"
 _ARCHIVE = f"{_BASE}/archive/"
-_MANIFEST = "manifest.json"
 _AFTER_WAIT = 1.0  # Seconds ``after`` waits for a newer frame.
 _AFTER_POLL = 0.01  # Seconds between looks for one, as often as the loop looks for a new frame.
 _EVENTS_BUFFER = 1 << 16  # Bytes the system holds for an ``events`` client that is not reading.
 _EVENTS_WAKE = 0.1  # Seconds an ``events`` stream waits before it looks at stop() again.
 _IDLE_TIMEOUT = 30.0  # Seconds an idle connection stays open, and any one write may take.
+_BODY_CHUNK = 1 << 16  # Bytes of a request's body read at a time.
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,7 @@ class LiveServer:
         self.archive = archive
         self.loop = loop
         self.last_messages = last_messages
+        self.writer = ArchiveWriter(archive, loop.reload)
         self.stopping = threading.Event()
         # A frame's id starts again at 1 on a restart, and a reader's id from before one must not
         # read as a frame still to come.
@@ -117,6 +123,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def __init__(self, live: LiveServer, *args: Any) -> None:
         self.live = live  # Before super(), which handles the request.
+        self._unread: int | None = 0  # Bytes left of a write's body. None when that is not known.
         super().__init__(*args)
 
     def do_GET(self) -> None:
@@ -132,6 +139,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
         except OSError:
             self.close_connection = True  # The client has gone, or is not reading.
+
+    def do_PUT(self) -> None:
+        self._write(self._put)
+
+    def do_DELETE(self) -> None:
+        self._write(self._delete)
 
     def log_message(self, format: str, *args: Any) -> None:
         _log.debug(format, *args)
@@ -174,7 +187,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _events(self) -> None:
         """Every sensor's state, then each change. Only this client's thread ever waits on it. An
-        ``OSError`` from a write drops the client, which reconnects to the full state."""
+        ``OSError`` from a write drops the client, which reconnects to the full state. So does a
+        new manifest, as no event says that a sensor has gone."""
         settings = self.live.settings
         self.close_connection = True
         # A small buffer, so that a client that stops reading is found soon.
@@ -191,7 +205,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(_event(id, entry))
             comment_at = time.monotonic() + settings.comment_every
             while not self.live.stopping.is_set():
-                if subscription.queue.qsize() > settings.max_backlog:
+                if subscription.outdated or subscription.queue.qsize() > settings.max_backlog:
                     return
                 wait = min(_EVENTS_WAKE, max(comment_at - time.monotonic(), 0))
                 change = subscription.get(wait)
@@ -218,19 +232,121 @@ class _Handler(BaseHTTPRequestHandler):
         if body is None:
             self.send_error(404)
         elif name == _MANIFEST:
-            self._reply(body, "application/json", no_store=True)
+            etag = etag_of(body) if self.live.writer.offered() else None
+            self._reply(body, "application/json", no_store=True, etag=etag)
         else:
             content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
             self._reply(body, content_type)
 
-    def _reply(self, body: bytes, content_type: str, no_store: bool = False) -> None:
+    def _write(self, route: Callable[[str, str], None]) -> None:
+        """Make the checks of every write, in the order LIVE.md lists them, and then ``route``,
+        which takes the file's name and the ``If-Match`` value."""
+        self._unread = _body_length(self.headers)
+        path = self.path.partition("?")[0]
+        try:
+            try:
+                if not path.startswith(_ARCHIVE):
+                    raise Refused(404)
+                if not self.live.writer.offered():
+                    self._refuse(405, allow="GET")
+                    return
+                if not _own_page(self.headers.get("Origin"), self.headers.get("Host")):
+                    raise Refused(403)
+                if_match = self.headers.get("If-Match")
+                if if_match is None:
+                    raise Refused(428)
+                self.live.writer.check_copy(if_match)
+                name = unquote(path.removeprefix(_ARCHIVE))
+                if not can_name(name):
+                    raise Refused(404)
+                route(name, if_match)
+            except Refused as refused:
+                self._refuse(refused.status, refused.rule)
+            except (r49.R49Error, OSError):
+                _log.exception("%s %r failed", self.command, path)
+                self._refuse(500)
+        except OSError:
+            self.close_connection = True  # The client has gone, or is not reading.
+
+    def _put(self, name: str, if_match: str) -> None:
+        if self._unread is None or "Content-Length" not in self.headers:
+            raise Refused(411)
+        if name == _MANIFEST:
+            etag = self.live.writer.put_manifest(if_match, b"".join(self._body()))
+        else:
+            self.live.writer.put_image(if_match, name, self._body())
+            etag = None
+        self._no_content(etag)
+
+    def _delete(self, name: str, if_match: str) -> None:
+        self.live.writer.delete(if_match, name)
+        self._no_content()
+
+    def _body(self) -> Iterator[bytes]:
+        """What is left of the body. A client that sends less than it said raises an ``OSError``."""
+        while self._unread:
+            chunk = self.rfile.read(min(self._unread, _BODY_CHUNK))
+            if not chunk:
+                raise ConnectionError("the body ended before its Content-Length")
+            self._unread -= len(chunk)
+            yield chunk
+
+    def _end_of_body(self) -> None:
+        """Take the rest of the body before answering. A client still sending when the connection
+        closes may get a reset in place of the answer. With a body of no known length, the
+        connection cannot be used again."""
+        for _ in self._body():
+            pass
+        if self._unread is None:
+            self.send_header("Connection", "close")
+
+    def _refuse(self, status: int, rule: str | None = None, allow: str | None = None) -> None:
+        body = b"" if rule is None else _json({"error": rule})
+        self.send_response(status)
+        if allow is not None:
+            self.send_header("Allow", allow)
+        if rule is not None:
+            self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._end_of_body()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _no_content(self, etag: str | None = None) -> None:
+        self.send_response(204)
+        if etag is not None:
+            self.send_header("ETag", etag)
+        self._end_of_body()
+        self.end_headers()
+
+    def _reply(
+        self, body: bytes, content_type: str, no_store: bool = False, etag: str | None = None
+    ) -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         if no_store:
             self.send_header("Cache-Control", "no-store")
+        if etag is not None:
+            self.send_header("ETag", etag)
         self.end_headers()
         self.wfile.write(body)
+
+
+def _own_page(origin: str | None, host: str | None) -> bool:
+    """``is_own_page``, with an ``Origin`` too malformed to read counting as a foreign one."""
+    try:
+        return is_own_page(origin, host)
+    except ValueError:
+        return False
+
+
+def _body_length(headers: Message) -> int | None:
+    """The length of a request's body, 0 with no sign of one, and None when it cannot be told."""
+    length = headers.get("Content-Length", "0")
+    if "Transfer-Encoding" in headers or not (length.isascii() and length.isdigit()):
+        return None
+    return int(length)
 
 
 def _fields(
@@ -249,6 +365,8 @@ def _fields(
     }
     if result.threshold is not None:
         fields["threshold"] = float(result.threshold)
+    if result.drift is not None:
+        fields["drift"] = _drift(result.drift)
     return fields
 
 
@@ -273,6 +391,12 @@ def _entry(entry: L1Entry) -> dict[str, Any]:
     if entry.state == "unknown":
         return {"state": "unknown", "reason": entry.reason}
     return {"state": "clear"}
+
+
+def _drift(drift: DriftReading | DriftUnmeasured) -> dict[str, Any]:
+    if isinstance(drift, DriftUnmeasured):
+        return {"unmeasured": drift.reason}
+    return {"px": drift.px, "tolerance_px": drift.tolerance_px, "past": drift.past}
 
 
 def _timings(stats: L1Stats, has_frame: bool) -> dict[str, float]:

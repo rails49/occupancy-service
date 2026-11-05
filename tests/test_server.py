@@ -16,7 +16,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fake_l1 import HEIGHT, WIDTH, FakeScorer, FakeSource, jpeg, running, wait_for, write_archive
+from fake_l1 import (
+    HEIGHT,
+    WIDTH,
+    FakeScorer,
+    FakeSource,
+    jpeg,
+    picture,
+    running,
+    wait_for,
+    write_archive,
+)
 from PIL import Image
 
 from occupancy_service.capture import Frame
@@ -70,12 +80,14 @@ def live(
     archive: Path,
     scores: dict[str, float] | None = None,
     last_messages: Callable[[], Mapping[str, Mapping[str, LastMessage]]] | None = None,
+    l1_settings: Mapping[str, Any] | None = None,
     **settings: Any,
 ) -> Iterator[Live]:
     source = FakeSource()
     scorer = FakeScorer(scores if scores is not None else {"s1": 0.9})
     server_settings = ServerSettings(address="127.0.0.1", port=0, **settings)
-    with running(L1Loop(L1Settings(archive), source, scorer)) as loop:
+    l1 = L1Settings(archive, **(l1_settings or {}))
+    with running(L1Loop(l1, source, scorer)) as loop:
         server = LiveServer(server_settings, archive, loop, last_messages)
         server.start()
         try:
@@ -305,6 +317,52 @@ def test_latest_carries_the_optional_fields(tmp_path: Path) -> None:
     assert fields["timings"]["rate_fps"] >= 0
     assert fields["camera"] == {"state": "ok", "rate_fps": 0.0, "frame_age_ms": 0.0}
     assert "patches" not in fields
+
+
+def test_latest_says_why_drift_is_unmeasured_with_a_frame_and_with_none(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        assert read_latest(service).fields["drift"] == {"unmeasured": "no first image"}
+        wait_until_served(service, service.source.show())
+        fields = read_latest(service).fields
+        assert check(service.base) == []
+
+    assert fields["drift"] == {"unmeasured": "no first image"}
+    assert fields["l1"] == {"s1": {"state": "occupied", "confidence": 0.9}}
+
+
+def test_latest_carries_the_reading_and_every_sensor_refuses_past_the_tolerance(
+    tmp_path: Path,
+) -> None:
+    archive = folder_archive(tmp_path)
+    (archive / "first.png").write_bytes(picture())
+    write_archive(archive, ONE_SENSOR, images=[{"filename": "first.png"}])
+    with live(archive, l1_settings={"drift_every": 0.01}) as service:
+
+        def drift_is(px: float) -> dict[str, Any] | None:
+            fields = read_latest(service).fields
+            return fields if fields["drift"].get("px") == px else None
+
+        service.source.show(picture(format="JPEG"))
+        within = wait_for(lambda: drift_is(0.0))
+        assert within["drift"] == {
+            "px": 0.0,
+            "tolerance_px": pytest.approx(8.247, abs=1e-3),
+            "past": False,
+        }
+
+        service.source.show(picture(dx=20, format="JPEG"))
+        past = wait_for(lambda: drift_is(20.0))
+        assert past["drift"]["past"] is True
+        assert past["l1"] == {"s1": {"state": "unknown", "reason": "drift"}}
+        assert past["scores"] == {"s1": 0.9}
+        assert check(service.base) == []
+
+
+def test_latest_has_no_drift_with_the_check_turned_off(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path), l1_settings={"drift_tolerance_g": None}) as service:
+        wait_until_served(service, service.source.show())
+        assert "drift" not in read_latest(service).fields
+        assert check(service.base) == []
 
 
 def test_with_the_camera_lost_only_the_json_part_and_with_frames_again_a_full_answer(
@@ -697,3 +755,27 @@ def test_last_messages_name_only_sensors_in_the_answer(tmp_path: Path) -> None:
     archive = write_archive(tmp_path / "archive", ONE_SENSOR)
     with live(archive, last_messages=lambda: sent) as service:
         assert set(read_latest(service).fields["last_messages"]) == {"s1"}
+
+
+def test_events_clients_are_closed_at_the_first_result_under_a_new_manifest(
+    tmp_path: Path,
+) -> None:
+    folder = folder_archive(tmp_path, {"kept": (160.0, 120.0), "old": (170.0, 120.0)})
+    with live(folder, {"kept": 0.9, "old": 0.9, "new": 0.9}) as service:
+        wait_until_served(service, service.source.show())
+        with event_stream(service) as stream:
+            for _ in range(2):
+                stream.next_event()
+
+            write_archive(folder, {"kept": (160.0, 120.0), "new": (180.0, 120.0)})
+            service.loop.reload()
+            assert stream.is_silent_for(0.2)  # The frame in progress is under the old manifest.
+
+            wait_until_served(service, service.source.show())
+            with pytest.raises(AssertionError, match="the stream ended"):
+                while True:
+                    stream.next_block()
+
+        with event_stream(service) as stream:
+            events = {stream.next_event()["sensor"] for _ in range(2)}
+            assert events == {"kept", "new"}

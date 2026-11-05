@@ -13,15 +13,49 @@ bin/install-hooks.sh    # refuse commits on main, and run the gate before each p
 
 ## Run
 
-The process that runs it all is not written yet: `Capture`, `L1Loop`, `LiveServer` and `Publisher` are started by the caller. `live-check` tests a running implementation against the contract:
+```sh
+uv run python -m occupancy_service --archive <path> --camera /dev/video0 --broker <host>:<port>
+```
+
+This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stderr. The camera's size is the manifest's `camera.resolution`, read once at the start, so a reload that changes it needs a restart.
+
+| Flag | Goes to | Default |
+| :--- | :--- | :--- |
+| `--archive` | `L1Settings.archive`, and `LiveServer`'s archive | Required |
+| `--camera` | `CaptureSettings.device` | Required |
+| `--broker <host>:<port>` | `PublisherSettings.host`, `port` | Required |
+| `--profile`, repeated | `PublisherSettings.profiles` | `occupancy` |
+| `--address` | `ServerSettings.address` | `127.0.0.1` |
+| `--port` | `ServerSettings.port` | `8000` |
+| `--engine` | `L1Settings.engine` | `onnxruntime` |
+| `--device` | `L1Settings.device` | `CPU` |
+| `--frame-rate` | `CaptureSettings.frame_rate` | `20` |
+
+Each of these refuses the process: it exits 1 with one line on stderr, with no `ffmpeg` started and no port left bound. A flag that argparse refuses, such as a malformed `--broker`, exits 2.
+
+- An archive that cannot be read, which is anything `r49.load` raises. Without a manifest the service has no sensors, no resolution and no archive id, so it has nothing to do, and it serves nothing. `control`'s timer per sensor reports the silence, and a restart policy picks up a repaired archive with no person restarting anything. A running service that loses its archive keeps its geometry.
+- A profile that raises `ProfileError`.
+- An address that cannot be bound.
+
+None of these refuses it. The process starts, and the parts report and recover as they do at any other time:
+
+- A camera that is absent: sensors read `no frames`.
+- A broker that is absent: it is retried, and `latest` answers meanwhile.
+- A model that does not load: sensors read `no model`.
+- A manifest with no `id`: sensors read `archive has no id`.
+
+SIGTERM and SIGINT both stop the parts and exit 0. `service stopped` goes out for every sensor while a broker is connected, and no `ffmpeg` is left behind.
+
+`live-check` tests a running implementation against the contract:
 
 ```sh
 uv run live-check http://localhost:8000/live
+uv run live-check --save http://localhost:8000/live    # also rewrites manifest.json with its own bytes
 ```
 
 ## L1
 
-`occupancy_service.l1` turns the newest frame into L1. It reads the archive's manifest and no image. `L1Settings` holds the archive's path, the distance from a track past which a sensor has no track (0.3 G), the time until `scoring stalled` (`stalled_after`, 1 s), and the engine, device and model, which default to onnxruntime and the model in the `rails49-classifier` wheel. `CaptureSettings` holds the time until the camera is `lost` (`lost_after`, 1 s).
+`occupancy_service.l1` turns the newest frame into L1. It reads the archive's manifest, and only the drift check reads an image. `L1Settings` holds the archive's path, the distance from a track past which a sensor has no track (0.3 G), the time until `scoring stalled` (`stalled_after`, 1 s), the [drift check](#drift)'s interval and tolerance, and the engine, device and model, which default to onnxruntime and the model in the `rails49-classifier` wheel. `CaptureSettings` holds the time until the camera is `lost` (`lost_after`, 1 s).
 
 The `openvino` engine needs the `openvino` extra (`uv sync --extra openvino`). The dev group holds it too, so the tests run it on the CPU. onnxruntime runs only on the CPU, and any other device reads `no model`.
 
@@ -29,6 +63,7 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 
 | Reason | When |
 | :--- | :--- |
+| `drift` | The newest [drift reading](#drift) is past the tolerance. This reason is on every sensor, whatever else applies to it. |
 | `archive has no id` | The manifest has no `id`. The service keeps running, so that a page can save the archive and mint one. |
 | `no model` | The model did not load. |
 | `DPT unresolved` | The calibration gives no DPT. |
@@ -40,9 +75,30 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 
 **The turnout limit:** a sensor near a turnout is scored like any other, but the training data leaves such positions out, so the classifier's accuracy there is not known. The service does not detect these sensors, and reports nothing special for them.
 
+## Drift
+
+`occupancy_service.drift` measures how far the camera has moved since the archive's `images[0]`, as `@occupancy/drift` in rails49/occupancy does, on the same [shared cases](LIVE.md#drift-cases). It does not correct drift. A person puts the camera back, or authors a new archive.
+
+`L1Settings` holds the interval (`drift_every`, 3 s) and the tolerance in track gauges (`drift_tolerance_g`, 0.5 G, multiplied by the layout's DPT). `drift_tolerance_g = None` turns the check off.
+
+The check takes the newest frame on its own thread, at once and then every interval, so a slow check does not delay L1. Models and sampling keep running through a refusal, so putting the camera back ends it with no restart. One reading decides, with no filter across samples and no override.
+
+`latest` reports the reading in [`drift`](LIVE.md#drift), and every MQTT profile carries the refusal as it carries any `unknown`, so a profile's hold applies to the `clear` that follows.
+
+| `unmeasured` | When |
+| :--- | :--- |
+| `no reading yet` | The check has not read a frame yet. |
+| `no first image` | The manifest has no images, or the archive does not hold the first. |
+| `DPT unresolved` | The calibration gives no DPT. |
+| `check failed` | The first image or a frame does not decode, the first image is too small to hold a block, or the check raised. A failed first image stays so until a reload, and a failed frame until the next sample. |
+
+With any of these, L1 goes on as if the camera had not moved. A reload rebuilds the check, on the thread that samples, from the new `images[0]`. The last reading, and any refusal, stands until the next one, unless the reload leaves nothing to measure against.
+
+A reading is in pixels of the first image and DPT is in `camera.resolution` pixels, so the two compare directly only when the first image is at `camera.resolution`.
+
 ## HTTP
 
-`occupancy_service.server` serves [LIVE.md](LIVE.md) under a fixed `/live`, with a thread per request. `ServerSettings` holds the address and port, which default to `127.0.0.1:8000`, and the limits of `events`. The caller owns the `L1Loop`. There are no `Access-Control-*` headers, and no check of `Origin`.
+`occupancy_service.server` serves [LIVE.md](LIVE.md) under a fixed `/live`, with a thread per request. `ServerSettings` holds the address and port, which default to `127.0.0.1:8000`, and the limits of `events`. The caller owns the `L1Loop`. There are no `Access-Control-*` headers. Only a write checks `Origin`.
 
 | Route | Answer |
 | :--- | :--- |
@@ -52,6 +108,8 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 | `GET /live/events` | Every sensor's state, then each new state or reason, with a comment line every 15 s. |
 | `GET /live/archive/<path>` | The file, through `rails49-r49`'s `image()`, from a zip or a folder. What it reports absent, or a path with a segment that starts with a dot, is a 404. |
 
+`PUT` and `DELETE` under `/live/archive/` [save back to a folder archive](LIVE.md#saving). `occupancy_service.archive_writer` does the writing, because `rails49-r49` only reads: each file goes to a dot-named temp file in its folder, is flushed to disk, then renamed. A saved manifest reloads the `L1Loop`. `occupancy_service.origin` holds a copy of `is_own_page` from `control`, with the code unchanged, and a change there is copied here by hand.
+
 `latest`, `events` and `manifest.json` are `no-store`. `frame_id` holds a token for this run of the service, and readers treat it as opaque.
 
 A frame not at `camera.resolution` is left out of `latest`, because the contract has the frame part at that size, and each sensor says `wrong frame size`. With no frame served, `timings` holds only `rate_fps`.
@@ -60,9 +118,9 @@ An `events` client that takes over 2 s over one write, or has over 1000 changes 
 
 ## MQTT
 
-`occupancy_service.publisher` publishes L1 as its active profiles say, over one `paho-mqtt` connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (30 s), and the timeout of connecting (2 s). To report in `latest`, pass `publisher.last_messages` to `LiveServer`.
+`occupancy_service.publisher` publishes L1 as its active profiles say, over one `paho-mqtt` connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (30 s), and the timeout of connecting (2 s). The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them.
 
-Every sensor goes out on each connect and on each repeat, and each change goes out at once. A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
+Every sensor goes out on each connect and on each repeat, and each change goes out at once, except a `clear` that a profile [holds](#holding-clear). A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
 
 ### Profile files
 
@@ -75,10 +133,26 @@ A profile is a TOML file. The `profiles` setting names each by a shipped profile
 | `retain` | `true` or `false`. |
 | `qos` | 0, 1 or 2. |
 | `repeat` | Seconds between sending every sensor, above 0. |
+| `clear_hold_s` | Optional. Seconds to [hold](#holding-clear) a `clear`, from 0. Absent or 0 means no hold. |
 
 In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
 
 A topic that holds `{archive_id}` publishes nothing while the archive has no `id`. A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
+
+### Holding `clear`
+
+One frame the classifier gets wrong would put `clear` on the topic in the middle of a train. Control takes the first `clear` after `occupied` on an entry sensor for the train's tail, so a profile can hold `clear` back.
+
+The hold lowers how often a sensor reads `clear` in the middle of a train and does not rule it out: a `clear` lasting longer than the hold is still published.
+
+With `clear_hold_s` set, a sensor whose last reported state on that profile is not `clear` publishes `clear` only once every result has read `clear` for that long. The time runs from the capture time of the first `clear` frame, and any other result restarts it, including one that came while the broker was gone. `clear` goes out on the first result captured at or after the end of the hold, so with the frames stopped it does not go out: a sensor goes `unknown` first.
+
+- Until then the profile keeps reporting the last state it published, with its `reason` if it has one, on each repeat and each connect. A sensor that was `unknown` stays `unknown`, so a wrong `clear` right after an outage is held too.
+- `occupied` and `unknown` go out at once, as do `unknown` at startup and on a clean stop.
+- The state is kept per sensor and per profile. A sensor with nothing reported yet, because a reload added it or because it was already `clear` when the service connected, says `unknown` with the reason `clear not yet held`. A sensor a reload removes is forgotten.
+- `last_messages` in `latest` shows what the profile sent, so it can differ from L1 for up to the hold. L1 and the rest of the [live contract](LIVE.md) do not change.
+
+The hold makes `clear` later, so control releases a block or transit up to that much later. Where a far sensor is `unknown`, control stops a train on the entry sensor's `clear`, so the train runs on by its speed times the hold: about 10 cm at 104 mm/s and 1 s.
 
 ### The shipped profiles
 
@@ -102,13 +176,14 @@ state = "unknown"
 reason = "{reason}"
 ```
 
-`control`, whose contract is rails49/control#1147. It has no last will, because `layout` has a timer per sensor. That timer wants every sensor at least once a second, so `repeat` leaves room for one to be late:
+`control`, whose contract is rails49/control#1147. It has no last will, because `layout` has a timer per sensor. That timer wants every sensor at least once a second, so `repeat` leaves room for one to be late. It holds `clear` for 1 s, which rails49/occupancy-service#18 measures on real trains:
 
 ```toml
 topic = "tc49/layout/sensor"
 retain = false
 qos = 0
 repeat = 0.9
+clear_hold_s = 1
 
 [payload.occupied]
 addr = "{sensor}"
@@ -132,4 +207,4 @@ A string payload is written the same way, as `clear = "OFF {sensor}"` under `[pa
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
 
-The L1 tests use a fake capture source and the packaged model, on the CPU. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both.
+The L1 tests use a fake capture source and the packaged model, on the CPU. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.
