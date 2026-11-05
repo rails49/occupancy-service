@@ -43,7 +43,7 @@ class Broker:
 
     def start(self) -> None:
         self.log_file = self.log.open("ab")
-        self.process = subprocess.Popen(
+        self.process = process = subprocess.Popen(
             [self.binary, "-c", str(self.config)], stdout=self.log_file, stderr=self.log_file
         )
         deadline = time.monotonic() + 10
@@ -51,9 +51,13 @@ class Broker:
             try:
                 socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
                 return
-            except OSError:
-                if time.monotonic() > deadline:
-                    raise
+            except OSError as error:
+                code = process.poll()
+                if code is not None or time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"{self.binary} is not listening on {self.port}, exit code {code}:\n"
+                        f"{self.log.read_text()}"
+                    ) from error
                 time.sleep(0.01)
 
     def stop(self) -> None:

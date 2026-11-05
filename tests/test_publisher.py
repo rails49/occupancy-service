@@ -63,6 +63,19 @@ def broker(tmp_path: Path) -> Iterator[Broker]:
     broker.stop()
 
 
+def test_a_broker_that_cannot_start_says_why_at_once(tmp_path: Path) -> None:
+    binary = mosquitto()
+    if binary is None:
+        pytest.skip("mosquitto is not installed")
+    broker = Broker(binary, tmp_path)
+    broker.config.write_text("no_such_option\n")
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="no_such_option"):
+        broker.start()
+    broker.stop()
+    assert time.monotonic() - started < 5
+
+
 @contextmanager
 def subscribed(broker: Broker, qos: int = 0) -> Iterator[Subscriber]:
     subscriber = Subscriber(broker.port, qos)
