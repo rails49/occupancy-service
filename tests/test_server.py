@@ -8,9 +8,10 @@ import socket
 import threading
 import time
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from PIL import Image
 from occupancy_service.capture import Frame
 from occupancy_service.l1 import L1Loop, L1Settings
 from occupancy_service.live_check import check
+from occupancy_service.publisher import LastMessage
 from occupancy_service.server import LiveServer, ServerSettings
 
 ONE_SENSOR = {"s1": (160.0, 120.0)}
@@ -64,12 +66,17 @@ class Latest:
 
 
 @contextmanager
-def live(archive: Path, scores: dict[str, float] | None = None, **settings: Any) -> Iterator[Live]:
+def live(
+    archive: Path,
+    scores: dict[str, float] | None = None,
+    last_messages: Callable[[], Mapping[str, Mapping[str, LastMessage]]] | None = None,
+    **settings: Any,
+) -> Iterator[Live]:
     source = FakeSource()
     scorer = FakeScorer(scores if scores is not None else {"s1": 0.9})
     server_settings = ServerSettings(address="127.0.0.1", port=0, **settings)
     with running(L1Loop(L1Settings(archive), source, scorer)) as loop:
-        server = LiveServer(server_settings, archive, loop)
+        server = LiveServer(server_settings, archive, loop, last_messages)
         server.start()
         try:
             yield Live(server, loop, source, scorer)
@@ -651,3 +658,42 @@ def test_several_answers_share_one_connection(tmp_path: Path) -> None:
             assert response.status == 200
             response.read()
         connection.close()
+
+
+SENT_AT = datetime(2026, 11, 5, 10, 15, 30, 125000, tzinfo=UTC)
+
+
+def test_latest_has_no_last_messages_when_nothing_publishes(tmp_path: Path) -> None:
+    with live(write_archive(tmp_path / "archive", ONE_SENSOR)) as service:
+        assert "last_messages" not in read_latest(service).fields
+
+
+def test_latest_reports_the_last_message_per_sensor_and_profile(tmp_path: Path) -> None:
+    sent = {
+        "s1": {
+            "table": LastMessage({"state": "clear"}, SENT_AT),
+            "text": LastMessage("OFF", SENT_AT),
+        },
+    }
+    archive = write_archive(tmp_path / "archive", ONE_SENSOR)
+    with live(archive, last_messages=lambda: sent) as service:
+        fields = read_latest(service).fields
+        assert fields["last_messages"] == {
+            "s1": {
+                "table": {
+                    "message": {"state": "clear"},
+                    "time": "2026-11-05T10:15:30.125000+00:00",
+                },
+                "text": {"message": "OFF", "time": "2026-11-05T10:15:30.125000+00:00"},
+            }
+        }
+        assert check(service.base, timeout=5) == []
+
+
+def test_last_messages_name_only_sensors_in_the_answer(tmp_path: Path) -> None:
+    """The publisher forgets a removed sensor on its next repeat, and the answer holds to one
+    manifest until then."""
+    sent = {"gone": {"p": LastMessage("OFF", SENT_AT)}, "s1": {"p": LastMessage("OFF", SENT_AT)}}
+    archive = write_archive(tmp_path / "archive", ONE_SENSOR)
+    with live(archive, last_messages=lambda: sent) as service:
+        assert set(read_latest(service).fields["last_messages"]) == {"s1"}

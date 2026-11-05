@@ -22,7 +22,7 @@ Nothing here is a safety interlock.
 
 Saving back to the archive is optional. rails49/occupancy-service#7 defines it.
 
-MQTT is not in the contract. rails49/occupancy-service#5 documents the profiles.
+MQTT is not in the contract. The [README](README.md#mqtt) documents the profiles.
 
 ## `GET <base>/latest`
 
@@ -70,7 +70,7 @@ A classifier's number for a clear sensor goes in the optional `scores`.
 
 ### Optional fields
 
-Everything except `l0` comes from the served frame.
+Everything except `l0` and `last_messages` comes from the served frame.
 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
@@ -81,13 +81,13 @@ Everything except `l0` comes from the served frame.
 | `changes` | object | Sensor id to the count of L1 changes, an integer from 0. |
 | `timings` | object | Any of `capture_ms`, `decode_ms`, `cut_ms`, `classify_ms` and `rate_fps`, each a number from 0. |
 | `camera` | object | Any of `state` (`ok` or `lost`), `rate_fps` and `frame_age_ms`, the last two numbers from 0. |
-| `last_messages` | | rails49/occupancy-service#5 defines it. |
+| `last_messages` | object | Sensor id to profile name to `{ message, time }`: the last message that profile published for that sensor, and when. A sensor or a profile with nothing published has no entry. `message` is an object for a payload sent as JSON and a string for one sent as text. `time` has the form of `captured_at`. |
 
 `patches` maps ids to part names because a sensor id is any non-empty string, and a part name cannot carry one safely: browsers return a `"` written as `%22` as those three characters.
 
 ### Example
 
-`GET <base>/latest?after=f-1041&patches=1` on an archive with the sensors `C3.A` and `C3.B`, at 1920 by 1080. The service offers every optional field except `last_messages`:
+`GET <base>/latest?after=f-1041&patches=1` on an archive with the sensors `C3.A` and `C3.B`, at 1920 by 1080. The service offers every optional field:
 
 ```http
 HTTP/1.1 200 OK
@@ -111,7 +111,15 @@ Content-Type: application/json
   "patches": { "C3.A": "patch-0", "C3.B": "patch-1" },
   "changes": { "C3.A": 4, "C3.B": 3 },
   "timings": { "capture_ms": 2.5, "decode_ms": 11, "cut_ms": 1.25, "classify_ms": 30, "rate_fps": 14.5 },
-  "camera": { "state": "ok", "rate_fps": 15, "frame_age_ms": 20 }
+  "camera": { "state": "ok", "rate_fps": 15, "frame_age_ms": 20 },
+  "last_messages": {
+    "C3.A": {
+      "occupancy": { "message": { "state": "occupied", "confidence": 0.93 }, "time": "2026-11-05T10:15:30.140Z" }
+    },
+    "C3.B": {
+      "occupancy": { "message": { "state": "clear" }, "time": "2026-11-05T10:15:30.141Z" }
+    }
+  }
 }
 --r49-live
 Content-Disposition: form-data; name="frame"; filename="frame.jpg"
@@ -177,7 +185,7 @@ One command checks a running implementation against this document:
 uvx --from git+https://github.com/rails49/occupancy-service live-check <base>
 ```
 
-It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. `last_messages` is not checked until rails49/occupancy-service#5 defines it. If it cannot read the manifest it stops there, because the other rules need it.
+It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. If it cannot read the manifest it stops there, because the other rules need it.
 
 It checks format and consistency only. Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
 
@@ -214,6 +222,7 @@ It checks format and consistency only. Timing rules need control of a camera, so
 | `optional/changes` | `changes` has the wrong shape, or names a sensor not in the manifest. |
 | `optional/timings` | `timings` has the wrong shape. |
 | `optional/camera` | `camera` has the wrong shape. |
+| `optional/last_messages` | `last_messages` has the wrong shape, or names a sensor not in the manifest. |
 | `patches/missing-part` | `patches` names a part the answer does not have. |
 | `patches/no-filename` | A part `patches` names has no `filename`. |
 | `patches/after` | `?patches=1` gives `patches`, and with a frame `?after=<frame id>&patches=1` does not. |

@@ -14,8 +14,10 @@ from fake_l1 import FakeScorer, FakeSource, running, wait_for, write_archive
 from mqtt_broker import Broker, Received, Subscriber, mosquitto
 
 from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings, L1Subscription
+from occupancy_service.live_check import check
 from occupancy_service.profile import ProfileError
 from occupancy_service.publisher import Publisher, PublisherSettings
+from occupancy_service.server import LiveServer, ServerSettings
 
 CLEAR = L1Entry("clear")
 OCCUPIED = L1Entry("occupied", confidence=0.93)
@@ -450,6 +452,28 @@ def test_last_messages_skip_a_sensor_a_profile_did_not_send(broker: Broker, tmp_
         wait_for(lambda: subscriber.on(CONTROL))
         wait_for(lambda: publisher.last_messages().get("a+b"))
         assert set(publisher.last_messages()["a+b"]) == {"control"}
+
+
+def test_the_real_service_reports_what_it_sent_in_latest(broker: Broker, tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "archive", {"s1": (160.0, 120.0)})
+    source = FakeSource()
+    loop = L1Loop(L1Settings(archive), source, FakeScorer({"s1": 0.9}))
+    with (
+        running(loop),
+        subscribed(broker) as subscriber,
+        publishing(loop, settings_for(broker)) as publisher,
+    ):
+        server = LiveServer(
+            ServerSettings(port=0), archive, loop, last_messages=publisher.last_messages
+        )
+        server.start()
+        try:
+            source.show()
+            subscriber.wait_for(lambda m: payload(m)["state"] == "occupied")
+            base = f"http://127.0.0.1:{server.port}/live"
+            assert check(base, timeout=5) == []
+        finally:
+            server.stop()
 
 
 def test_no_python_file_under_src_names_the_controller() -> None:

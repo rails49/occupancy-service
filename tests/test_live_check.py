@@ -231,7 +231,15 @@ def every_optional_field() -> dict[str, Any]:
             "rate_fps": 14.5,
         },
         "camera": {"state": "ok", "rate_fps": 15, "frame_age_ms": 20},
-        "last_messages": {"anything": ["#5 defines it"]},
+        "last_messages": {
+            "C3.A": {
+                "occupancy": {
+                    "message": {"state": "occupied", "confidence": 0.93},
+                    "time": "2026-11-05T10:15:30.125Z",
+                },
+                "text-profile": {"message": "ON", "time": "2026-11-05T10:15:30.125+00:00"},
+            },
+        },
     }
 
 
@@ -275,6 +283,14 @@ def test_accepts_the_json_only_answer_with_optional_fields() -> None:
         ("camera", {"state": "fine"}),
         ("camera", {"rate_fps": "15"}),
         ("camera", {"frame_age_ms": -1}),
+        ("last_messages", []),
+        ("last_messages", {"ghost": {}}),
+        ("last_messages", {"C3.A": []}),
+        ("last_messages", {"C3.A": {"p": "ON"}}),
+        ("last_messages", {"C3.A": {"p": {"time": "2026-11-05T10:15:30Z"}}}),
+        ("last_messages", {"C3.A": {"p": {"message": "ON"}}}),
+        ("last_messages", {"C3.A": {"p": {"message": "ON", "time": "soon"}}}),
+        ("last_messages", {"C3.A": {"p": {"message": 1, "time": "2026-11-05T10:15:30Z"}}}),
     ],
 )
 def test_refuses_a_malformed_optional_field(field: str, value: Any) -> None:
