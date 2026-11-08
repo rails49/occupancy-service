@@ -120,7 +120,7 @@ An `events` client that takes over 2 s over one write, or has over 1000 changes 
 
 `occupancy_service.publisher` publishes L1 as its active profiles say, over `paho-mqtt`: one connection for every profile whose `connection` is `shared`, and [one per sensor](#one-connection-per-sensor) on each profile whose `connection` is `per_sensor`. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive of every connection (5 s), and the timeout of connecting (2 s). A broker gives up on a silent connection after one and a half keepalives, and then sends its [last will](#one-connection-per-sensor), so a will goes out within about 8 s of a host or a network failing. A killed process closes its connections, and the broker sends each will at once. The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them.
 
-Every sensor goes out on each connect of the connection that carries it and on each repeat, and each change goes out at once, except a `clear` that a profile [holds](#holding-clear). A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
+Every sensor goes out on each connect of the connection that carries it and on each repeat, and each change goes out at once, except a `clear` that a profile [holds](#holding-clear). A change is a new state or a new reason. A profile with `repeat = 0` does not repeat, and sends a change, a clean stop's `unknown` or a removed sensor's `unknown` only if its payload differs from the last one sent for that sensor. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
 
 ### Profile files
 
@@ -132,7 +132,7 @@ A profile is a TOML file. The `profiles` setting names each by a shipped profile
 | `payload.occupied`, `payload.clear`, `payload.unknown` | What to send. A table is sent as JSON, and a string as text. Each may hold `{sensor}`, `occupied` also `{confidence}`, and `unknown` also `{reason}`. |
 | `retain` | `true` or `false`. |
 | `qos` | 0, 1 or 2. |
-| `repeat` | Seconds between sending every sensor, above 0. |
+| `repeat` | Seconds between sending every sensor, from 0. 0 means no repeat: every sensor still goes out on each connect, and anything else only if its payload differs from the last one sent for that sensor. |
 | `clear_hold_s` | Optional. Seconds to [hold](#holding-clear) a `clear`, from 0. Absent or 0 means no hold. |
 | `connection` | Optional. `shared`, the default, or `per_sensor` for [one connection per sensor](#one-connection-per-sensor). |
 | `will_state` | Optional, and only with `per_sensor`. `occupied`, `clear` or `unknown`: the state whose payload is each sensor's last will, on that sensor's topic, with the profile's `retain` and `qos`. A `{reason}` in it is `connection lost`, and it cannot hold `{confidence}`. Absent means no will. |
@@ -240,6 +240,39 @@ Turn it on with `--profile jmri`, or with `--profile occupancy --profile jmri` t
 - With no archive `id`, every sensor reads `archive has no id`, which is `ACTIVE`.
 
 JMRI does not notice a hung service whose connections stay up: its sensors keep the last state the service sent.
+
+`rocrail`, for Rocrail's sensors. It is not active by default:
+
+```toml
+topic = "rocrail/service/field"
+retain = false
+qos = 1
+repeat = 0
+connection = "per_sensor"
+will_state = "unknown"
+
+[payload]
+occupied = '<fb id="{sensor}" state="true"/>'
+clear = '<fb id="{sensor}" state="false"/>'
+unknown = '<fb id="{sensor}" state="true"/>'
+```
+
+### Rocrail
+
+Turn it on with `--profile rocrail`, or with `--profile occupancy --profile rocrail` to keep the own vocabulary too. In Rocrail, set the MQTT broker's host and port to the service's broker, as the [wiki's services page](https://wiki.rocrail.net/doku.php?id=rocrailini-service-en) says. A sensor's `id` must be Rocrail's sensor ID, and should avoid `"`, `<` and `&`: the service does not escape it, and Rocrail drops a message it cannot parse. `rocrail/service/field` needs no support key and no address or interface on the sensor. This was checked on Rocrail 26.05.15.
+
+- `occupied` is `true` and `clear` is `false`. `unknown` is `true` too, as Rocrail has only the two: a sensor the service cannot see is taken as occupied.
+- Nothing is retained and nothing repeats, because Rocrail takes a repeated `true` as a new event. A change goes out only when it turns `true` into `false` or back, so `occupied` to `unknown`, or a new reason, sends nothing.
+- Each sensor has its own connection, whose last will is `true`. A service that is killed, or whose host or network fails, turns every sensor `true`: at once for a killed process, and within about 8 s for a failure the broker notices only by the keepalive. A clean stop leaves every sensor `true` too.
+- A sensor the manifest removes is sent `true`, if it was not already, and stays `true` in Rocrail.
+- With no archive `id`, every sensor reads `archive has no id`, which is `true`.
+
+In automatic mode, `unknown`, or a false detection, on a block with no train is a ghost train, and by default Rocrail then turns off track power until a person turns it on. That includes a block just released while its sensor stays `true`, as a train's tail leaves it. With `poweroffatghost="false"` on `ctrl` in `rocrail.ini`, a ghost closes only that block, and a running train continues. Outside automatic mode no ghost is reported.
+
+- Start the service before turning on automatic mode, so every sensor has its state first.
+- Restart the service after restarting Rocrail. With no repeat and no retain, Rocrail keeps the states it had until the next change. This is expected, and not yet tested.
+
+Rocrail does not notice a hung service whose connections stay up, nor a lost broker: its sensors keep the last state the service sent.
 
 ## Test
 
