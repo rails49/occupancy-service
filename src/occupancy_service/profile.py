@@ -49,9 +49,9 @@ def encode(message: Message) -> bytes:
 
 @dataclass(frozen=True)
 class Profile:
-    """One loaded profile, named after its file. ``repeat`` and ``clear_hold_s`` are in seconds,
-    and a ``clear_hold_s`` of 0 means no hold. ``connection`` is ``shared`` or ``per_sensor``, and
-    only ``per_sensor`` may name a ``will_state``."""
+    """One loaded profile, named after its file. ``repeat`` and ``clear_hold_s`` are in seconds. A
+    ``repeat`` of 0 means no repeat, and a ``clear_hold_s`` of 0 means no hold. ``connection`` is
+    ``shared`` or ``per_sensor``, and only ``per_sensor`` may name a ``will_state``."""
 
     name: str
     topic: str
@@ -198,8 +198,8 @@ def _parse_qos(qos: Any) -> int:
 
 
 def _parse_repeat(repeat: Any) -> float:
-    if type(repeat) not in (int, float) or not math.isfinite(repeat) or repeat <= 0:
-        raise ValueError("repeat must be a number of seconds above 0")
+    if type(repeat) not in (int, float) or not math.isfinite(repeat) or repeat < 0:
+        raise ValueError("repeat must be a number of seconds from 0, where 0 means no repeat")
     return repeat
 
 

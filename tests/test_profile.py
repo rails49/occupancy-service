@@ -190,7 +190,8 @@ def test_a_sensor_id_with_a_lone_surrogate_still_goes_out_as_text(tmp_path: Path
         (lambda text: text.replace("retain = false", 'retain = "no"'), "retain"),
         (lambda text: text.replace("qos = 0", "qos = 3"), "qos"),
         (lambda text: text.replace("qos = 0", "qos = true"), "qos"),
-        (lambda text: text.replace("repeat = 1", "repeat = 0"), "repeat"),
+        (lambda text: text.replace("repeat = 1", "repeat = -1"), "repeat"),
+        (lambda text: text.replace("repeat = 1", "repeat = nan"), "repeat"),
         (lambda text: text.replace("repeat = 1", "repeat = true"), "repeat"),
         (lambda text: text.replace("[payload]", "clear_hold_s = -1\n[payload]"), "clear_hold_s"),
         (lambda text: text.replace("[payload]", "clear_hold_s = true\n[payload]"), "clear_hold_s"),
@@ -282,6 +283,10 @@ def test_refuses_a_connection_or_will_it_cannot_use(
     path = write(tmp_path, VALID.replace("[payload]", f"{lines}\n[payload]"))
     with pytest.raises(ProfileError, match=complaint):
         load_profile(str(path))
+
+
+def test_a_repeat_of_0_means_no_repeat(tmp_path: Path) -> None:
+    assert load_profile(str(write(tmp_path, VALID.replace("repeat = 1", "repeat = 0")))).repeat == 0
 
 
 def test_refuses_a_will_whose_payload_needs_a_confidence(tmp_path: Path) -> None:
