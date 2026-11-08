@@ -40,7 +40,7 @@ class PublisherSettings:
     port: int = 1883
     profiles: tuple[str, ...] = ("occupancy",)
     retry_every: int = 1
-    keepalive: int = 30
+    keepalive: int = 5
     timeout: float = 2.0
 
 
