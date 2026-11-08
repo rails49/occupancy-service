@@ -1040,3 +1040,111 @@ def test_a_profile_that_repeats_sends_a_change_whose_payload_is_unchanged(
         source.show({"a": NO_FRAMES})
         wait_for(lambda: len(subscriber.on("t/a")) == 2)
         assert payloads(subscriber) == [b"ON", b"ON"]
+
+
+ROCRAIL = "rocrail/service/field"
+
+
+def fb(sensor: str, state: bool) -> bytes:
+    return f'<fb id="{sensor}" state="{str(state).lower()}"/>'.encode()
+
+
+def on_rocrail(subscriber: Subscriber, sensor: str) -> list[Received]:
+    """What went out for ``sensor`` on Rocrail's one topic."""
+    return [m for m in subscriber.on(ROCRAIL) if f'id="{sensor}"'.encode() in m.payload]
+
+
+def test_rocrail_sends_each_state_once_at_qos_1_and_not_retained(broker: Broker) -> None:
+    source = FakeResults({"occupied": OCCUPIED, "clear": CLEAR, "unknown": NO_FRAMES})
+    with (
+        subscribed(broker, qos=1) as subscriber,
+        publishing(source, settings_for(broker, "rocrail")),
+    ):
+        wait_for(lambda: len(subscriber.on(ROCRAIL)) == 3)
+        time.sleep(1.5)  # Past what a repeat of 1 s would send.
+        assert sorted((m.payload, m.qos, m.retain) for m in subscriber.messages) == [
+            (fb("clear", False), 1, False),
+            (fb("occupied", True), 1, False),
+            (fb("unknown", True), 1, False),
+        ]
+        with subscribed(broker) as late:
+            time.sleep(0.5)
+            assert late.messages == []
+
+
+def test_rocrail_sends_a_change_only_where_true_or_false_changes(broker: Broker) -> None:
+    source = FakeResults({"a": OCCUPIED})
+    with (
+        subscribed(broker, qos=1) as subscriber,
+        publishing(source, settings_for(broker, "rocrail")),
+    ):
+        subscriber.wait_for(lambda m: m.payload == fb("a", True))
+        source.show({"a": NO_FRAMES})  # occupied to unknown
+        source.show({"a": L1Entry("unknown", reason="scoring stalled")})  # A new reason.
+        time.sleep(0.5)
+        assert [m.payload for m in on_rocrail(subscriber, "a")] == [fb("a", True)]
+        changed_at = time.monotonic()
+        source.show({"a": CLEAR})  # unknown to clear
+        cleared = subscriber.wait_for(lambda m: m.payload == fb("a", False))
+        assert cleared.at - changed_at < 0.25
+
+
+def test_rocrail_gives_a_restarted_broker_every_sensor_again(broker: Broker) -> None:
+    sensors = {"a": OCCUPIED, "b": CLEAR, "c": NO_FRAMES}
+    with publishing(FakeResults(sensors), settings_for(broker, "rocrail")):
+        with subscribed(broker, qos=1) as subscriber:
+            wait_for(lambda: len(subscriber.on(ROCRAIL)) == 3)
+        broker.stop()
+        broker.start()  # The publisher tries again after 1 s, and this subscriber is up by then.
+        with subscribed(broker, qos=1) as subscriber:
+            wait_for(lambda: len(subscriber.on(ROCRAIL)) == 3)
+            assert sorted(m.payload for m in subscriber.on(ROCRAIL)) == sorted(
+                [fb("a", True), fb("b", False), fb("c", True)]
+            )
+
+
+def test_rocrail_connects_a_sensor_a_reload_adds_and_disconnects_one_it_removes(
+    broker: Broker,
+) -> None:
+    source = FakeResults({"kept": CLEAR, "removed": CLEAR, "busy": OCCUPIED})
+    with (
+        subscribed(broker, qos=1) as subscriber,
+        publishing(source, settings_for(broker, "rocrail")),
+    ):
+        wait_for(lambda: len(subscriber.on(ROCRAIL)) == 3)
+        source.show({"kept": CLEAR, "added": CLEAR})
+        subscriber.wait_for(lambda m: m.payload == fb("added", False))
+        subscriber.wait_for(lambda m: m.payload == fb("removed", True))
+        prefix = "occupancy-service-rocrail-archive-1-"
+        wait_for(lambda: len(disconnected_clients(broker)) == 2)
+        assert sorted(disconnected_clients(broker)) == [prefix + "busy", prefix + "removed"]
+        assert prefix + "added" in connected_clients(broker)
+        time.sleep(0.5)
+        # "busy" was already true, so it gets nothing more: Rocrail would take it as a new event.
+        assert [m.payload for m in on_rocrail(subscriber, "busy")] == [fb("busy", True)]
+        assert [m.payload for m in on_rocrail(subscriber, "removed")] == [
+            fb("removed", False),
+            fb("removed", True),
+        ]
+
+
+def test_rocrail_with_no_archive_id_reports_every_sensor_true(broker: Broker) -> None:
+    no_id = L1Entry("unknown", reason="archive has no id")
+    source = FakeResults({"a": no_id, "b": no_id}, archive_id=None)
+    with (
+        subscribed(broker, qos=1) as subscriber,
+        publishing(source, settings_for(broker, "rocrail")),
+    ):
+        wait_for(lambda: len(subscriber.on(ROCRAIL)) == 2)
+        assert sorted(m.payload for m in subscriber.on(ROCRAIL)) == [fb("a", True), fb("b", True)]
+    assert sorted(connected_clients(broker)) == [
+        "occupancy-service-rocrail-a",
+        "occupancy-service-rocrail-b",
+    ]
+
+
+def test_no_python_file_under_src_names_rocrail() -> None:
+    src = Path(__file__).parent.parent / "src"
+    named = [path for path in src.rglob("*.py") if "rocrail" in path.read_text().lower()]
+    assert named == []
+    assert len(list(src.rglob("*.py"))) > 3

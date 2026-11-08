@@ -423,3 +423,30 @@ def test_sigkill_on_a_shared_profile_sends_no_will(
         assert [m for m in subscriber.messages if m.at > died_at] == []
     finally:
         subscriber.close()
+
+
+def test_sigkill_sends_one_true_per_rocrail_sensor_and_retains_nothing(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path, broker: Broker
+) -> None:
+    broker.start()
+    subscriber = Subscriber(broker.port, qos=1)
+    topic = "rocrail/service/field"
+    true = {f'<fb id="{id}" state="true"/>'.encode() for id in SENSORS}
+    try:
+        with started(tmp_path, camera, archive, broker.port, "--profile", "rocrail") as service:
+            wait_for(lambda: len(subscriber.on(topic)) >= len(SENSORS), 10)
+            died_at = killed(service, camera)
+        # Nothing of the service's sends after it died: these are the broker's, from each will.
+        wait_for(lambda: len([m for m in subscriber.on(topic) if m.at > died_at]) >= len(SENSORS))
+        time.sleep(0.5)
+        wills = [m for m in subscriber.on(topic) if m.at > died_at]
+        assert sorted(m.payload for m in wills) == sorted(true)
+        assert {(m.qos, m.retain) for m in wills} == {(1, False)}
+    finally:
+        subscriber.close()
+    late = Subscriber(broker.port)
+    try:
+        time.sleep(0.5)
+        assert late.messages == []
+    finally:
+        late.close()
