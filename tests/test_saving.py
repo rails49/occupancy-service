@@ -212,9 +212,9 @@ def test_outside_the_archive_a_write_is_404(service: Service) -> None:
         assert service.send("PUT", path, b"x", If_Match=service.etag())[0] == 404
 
 
-@pytest.mark.parametrize("path", [PHOTO, MANIFEST])
-def test_a_body_with_no_content_length_is_411(service: Service, path: str) -> None:
-    head = f"PUT {path} HTTP/1.1\r\nHost: test\r\nIf-Match: {service.etag()}\r\n"
+@pytest.mark.parametrize(("method", "path"), [("PUT", PHOTO), ("PUT", MANIFEST), ("DELETE", PHOTO)])
+def test_a_body_with_no_content_length_is_411(service: Service, method: str, path: str) -> None:
+    head = f"{method} {path} HTTP/1.1\r\nHost: test\r\nIf-Match: {service.etag()}\r\n"
     head += "Transfer-Encoding: chunked\r\n\r\n"
     # Only the head: the answer closes the connection, as the end of such a body cannot be told.
     with socket.create_connection(("127.0.0.1", service.server.port), timeout=10) as connection:
@@ -231,6 +231,12 @@ def test_a_body_with_no_content_length_is_411(service: Service, path: str) -> No
 def test_a_content_length_that_is_no_length_is_411(service: Service, length: str) -> None:
     status, _, _ = service.send("PUT", PHOTO, None, If_Match=service.etag(), Content_Length=length)
     assert status == 411
+
+
+def test_a_delete_with_no_body_and_no_content_length_is_carried_out(service: Service) -> None:
+    status, _, _ = service.send("DELETE", PHOTO, If_Match=service.etag())
+    assert status == 204
+    assert not (service.folder / "photo.jpg").exists()
 
 
 def test_a_folder_in_the_way_of_an_image_is_409(service: Service) -> None:

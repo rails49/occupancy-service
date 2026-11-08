@@ -279,6 +279,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._no_content(etag)
 
     def _delete(self, name: str, if_match: str) -> None:
+        if self._unread is None:
+            raise Refused(411)  # A body of no known length; with no body, none is needed.
         self.live.writer.delete(if_match, name)
         self._no_content()
 
