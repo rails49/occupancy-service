@@ -5,6 +5,7 @@ import http.client
 import io
 import json
 import socket
+import sys
 import threading
 import time
 import zipfile
@@ -19,8 +20,10 @@ import pytest
 from fake_l1 import (
     HEIGHT,
     WIDTH,
+    FakeDetector,
     FakeScorer,
     FakeSource,
+    detection,
     jpeg,
     picture,
     running,
@@ -81,13 +84,14 @@ def live(
     scores: dict[str, float] | None = None,
     last_messages: Callable[[], Mapping[str, Mapping[str, LastMessage]]] | None = None,
     l1_settings: Mapping[str, Any] | None = None,
+    detector: FakeDetector | None = None,
     **settings: Any,
 ) -> Iterator[Live]:
     source = FakeSource()
     scorer = FakeScorer(scores if scores is not None else {"s1": 0.9})
     server_settings = ServerSettings(address="127.0.0.1", port=0, **settings)
     l1 = L1Settings(archive, **(l1_settings or {}))
-    with running(L1Loop(l1, source, scorer)) as loop:
+    with running(L1Loop(l1, source, scorer, detector=detector)) as loop:
         server = LiveServer(server_settings, archive, loop, last_messages)
         server.start()
         try:
@@ -317,6 +321,92 @@ def test_latest_carries_the_optional_fields(tmp_path: Path) -> None:
     assert fields["timings"]["rate_fps"] >= 0
     assert fields["camera"] == {"state": "ok", "rate_fps": 0.0, "frame_age_ms": 0.0}
     assert "patches" not in fields
+
+
+def test_latest_names_l0s_own_frame_when_the_detector_is_slower(tmp_path: Path) -> None:
+    detector = FakeDetector([detection(160, 120, length=48, angle=0.25, confidence=0.7)])
+    settings = {"detect_every": 60}
+    with live(folder_archive(tmp_path), {"s1": 0.1}, None, settings, detector) as service:
+        first = service.source.show()
+        wait_for(lambda: "l0" in read_latest(service).fields)
+        later = service.source.show()
+        wait_until_served(service, later)
+        fields = read_latest(service).fields
+        assert check(service.base) == []
+
+    assert fields["frame_id"].endswith(f"-{later.id}")
+    assert fields["l0"] == {
+        "frame_id": fields["frame_id"].removesuffix(f"-{later.id}") + f"-{first.id}",
+        "captured_at": first.arrived_at.isoformat(),
+        "detections": [
+            {
+                "centre": {"x": 160, "y": 120},
+                "length": 48,
+                "width": 30,
+                "angle": 0.25,
+                "class": "passenger",
+                "confidence": 0.7,
+            }
+        ],
+    }
+    assert fields["l1"] == {"s1": {"state": "occupied", "confidence": 0.7}}
+    assert fields["detector"] == {"state": "ok"}
+    assert fields["timings"]["detect_ms"] >= 0
+    assert fields["timings"]["l0_rate_fps"] == 0
+    assert fields["timings"]["l0_age_ms"] >= 0
+
+
+def test_latest_has_an_empty_l0_when_the_detector_finds_nothing(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path), {"s1": 0.1}, detector=FakeDetector()) as service:
+        service.source.show()
+        fields = wait_for(lambda: (f := read_latest(service).fields).get("l0") and f)
+
+    assert fields["l0"]["detections"] == []
+    assert fields["l1"] == {"s1": {"state": "clear"}}
+
+
+def test_latest_drops_l0_at_the_limit(tmp_path: Path) -> None:
+    detector = FakeDetector([detection(160, 120)])
+    settings = {"detect_every": 60, "l0_limit": 0.3}
+    with live(folder_archive(tmp_path), {"s1": 0.1}, None, settings, detector) as service:
+        service.source.show()
+        wait_for(lambda: "l0" in read_latest(service).fields)
+
+        def stale() -> dict[str, Any] | None:
+            wait_until_served(service, service.source.show())
+            fields = read_latest(service).fields
+            return None if "l0" in fields else fields
+
+        fields = wait_for(stale)
+        assert check(service.base) == []
+
+    assert fields["l1"] == {"s1": {"state": "clear"}}
+    assert fields["timings"]["l0_age_ms"] > 300
+
+
+def test_latest_has_no_detector_and_no_l0_with_no_model_path(tmp_path: Path) -> None:
+    with live(folder_archive(tmp_path)) as service:
+        wait_until_served(service, service.source.show())
+        fields = read_latest(service).fields
+
+    assert "detector" not in fields
+    assert "l0" not in fields
+    assert not {"detect_ms", "l0_rate_fps", "l0_age_ms"} & fields["timings"].keys()
+
+
+def test_latest_says_the_detector_failed_with_the_package_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "detector", None)
+    settings = {"detector_model": tmp_path / "model.onnx"}
+    with live(folder_archive(tmp_path), {"s1": 0.9}, None, settings) as service:
+        wait_until_served(service, service.source.show())
+        fields = read_latest(service).fields
+        assert check(service.base) == []
+
+    assert fields["detector"] == {"state": "failed", "reason": "rails49-detector is not installed"}
+    assert "l0" not in fields
+    assert fields["l1"] == {"s1": {"state": "occupied", "confidence": 0.9}}
 
 
 def test_latest_says_why_drift_is_unmeasured_with_a_frame_and_with_none(tmp_path: Path) -> None:
