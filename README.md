@@ -178,7 +178,8 @@ A topic that holds `{archive_id}` publishes nothing while the archive has no `id
 A profile with `connection = "per_sensor"` opens one connection for each sensor it can report, with the keepalive in `PublisherSettings` (5 s). Its client id is `occupancy-service-<profile>-<archive id>-<sensor>`, or `occupancy-service-<profile>-<sensor>` while the archive has no `id`. With a `will_state`, the broker publishes that state's payload on the sensor's topic when the connection ends without a clean disconnect: when the process is killed, or its host or network fails. A shared connection has no will.
 
 - A sensor a reload adds gets its connection with no restart, and sends its state once that connection is up.
-- A sensor a reload removes, or each sensor when the archive's `id` changes, sends `unknown` with the reason `sensor removed`, then disconnects cleanly, so the broker keeps that `unknown` where the profile is retained.
+- A sensor a reload removes sends `unknown` with the reason `sensor removed`, then disconnects cleanly, so the broker keeps that `unknown` where the profile is retained.
+- When the archive's `id` changes, each sensor's connection disconnects cleanly, and a new one, whose client id holds the new `id`, sends the sensor's state once it is up. Only where the sensor is gone, or its topic holds `{archive_id}` and so changes too, does the old connection first send `unknown` with the reason `sensor removed` on the old topic. A sensor whose topic stays the same sends nothing first, so a `clear` sensor does not read `true` for a moment on Rocrail, which takes it as a ghost train, or `ACTIVE` on JMRI.
 - A clean stop sends `unknown` with the reason `service stopped` on each connection, then disconnects each cleanly.
 
 A hung process whose connections stay up sends nothing, and the broker sends no will, as its paho threads go on answering the keepalive. Only a profile's repeat stopping shows that.
