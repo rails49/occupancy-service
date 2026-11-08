@@ -683,23 +683,32 @@ def test_a_reconnect_during_a_hold_reports_the_last_published_state(
 def test_a_break_in_clear_while_the_broker_is_gone_restarts_the_hold(
     broker: Broker, tmp_path: Path
 ) -> None:
-    path = profile_file(tmp_path, repeat=60, clear_hold_s=0.5)
+    """On capture times the test sets, as the hold runs on them."""
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=30)
     source = FakeResults({"a": OCCUPIED})
+    first = datetime(2026, 11, 5, 12, tzinfo=UTC)
+    source.frame = Frame(b"", 1, first)
     with publishing(source, settings_for(broker, path)):
         with subscribed(broker) as before:
             wait_for(lambda: before.on("own/a"))
         source.show({"a": CLEAR})
         time.sleep(0.1)
         broker.stop()
+        source.frame = Frame(b"", 2, first + timedelta(seconds=1))
         source.show({"a": OCCUPIED})
-        time.sleep(0.6)  # The hold that began before the break would have ended by now.
+        time.sleep(0.1)
+        # The hold that began before the break would have ended by now.
+        source.frame = Frame(b"", 3, first + timedelta(seconds=31))
         source.show({"a": CLEAR})
+        time.sleep(0.1)
         broker.start()
         with subscribed(broker) as after:
-            first = after.wait_for(lambda m: m.topic == "own/a")
-            assert payload(first)["state"] == "occupied"
-            clear = after.wait_for(lambda m: payload(m)["state"] == "clear")
-            assert clear.at - first.at >= 0.4
+            first_after = after.wait_for(lambda m: m.topic == "own/a")
+            assert payload(first_after)["state"] == "occupied"
+            time.sleep(0.3)
+            assert set(states(after)) == {"occupied"}
+            source.frame = Frame(b"", 4, first + timedelta(seconds=61))
+            after.wait_for(lambda m: payload(m)["state"] == "clear")
 
 
 def test_two_profiles_at_once_hold_apart_and_last_messages_show_what_each_sent(
