@@ -226,7 +226,7 @@ Under `<base>/archive/<path>`, checked in this order:
 | 428 | There is no `If-Match`. |
 | 412 | `If-Match` is anything but the current manifest's `ETag`. |
 | 404 | `manifest/filename` refuses the name, or a segment starts with a dot. Names are percent-decoded as on `GET`. |
-| 411 | A `PUT` has no `Content-Length`. |
+| 411 | A write has no `Content-Length` for its body. A `DELETE` with no body needs none. |
 
 ### Routes
 
