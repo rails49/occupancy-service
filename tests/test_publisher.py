@@ -977,3 +977,66 @@ def test_no_python_file_under_src_names_jmri() -> None:
     named = [path for path in src.rglob("*.py") if "jmri" in path.read_text().lower()]
     assert named == []
     assert len(list(src.rglob("*.py"))) > 3
+
+
+def on_off(broker: Broker, folder: Path, repeat: float) -> PublisherSettings:
+    """A profile whose ``occupied`` and ``unknown`` are the same payload."""
+    path = profile_file(
+        folder, topic="t/{sensor}", repeat=repeat, occupied='"ON"', clear='"OFF"', unknown='"ON"'
+    )
+    return settings_for(broker, path)
+
+
+def payloads(subscriber: Subscriber, topic: str = "t/a") -> list[bytes]:
+    return [message.payload for message in subscriber.on(topic)]
+
+
+def test_no_repeat_sends_nothing_after_the_connect_while_nothing_changes(
+    broker: Broker, tmp_path: Path
+) -> None:
+    source = FakeResults({"a": OCCUPIED, "b": CLEAR})
+    with subscribed(broker) as subscriber, publishing(source, on_off(broker, tmp_path, 0)):
+        wait_for(lambda: subscriber.on("t/a") and subscriber.on("t/b"))
+        time.sleep(1)
+        assert (payloads(subscriber, "t/a"), payloads(subscriber, "t/b")) == ([b"ON"], [b"OFF"])
+
+
+def test_no_repeat_sends_a_change_only_where_its_payload_differs(
+    broker: Broker, tmp_path: Path
+) -> None:
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, on_off(broker, tmp_path, 0)):
+        subscriber.wait_for(lambda m: m.topic == "t/a")
+        source.show({"a": NO_FRAMES})
+        source.show({"a": L1Entry("unknown", reason="scoring stalled")})
+        time.sleep(0.5)
+        assert payloads(subscriber) == [b"ON"]
+        changed_at = time.monotonic()
+        source.show({"a": CLEAR})
+        cleared = subscriber.wait_for(lambda m: m.payload == b"OFF")
+        assert cleared.at - changed_at < 0.25
+        source.show({"a": OCCUPIED})
+        subscriber.wait_for(lambda m: m.at > cleared.at and m.payload == b"ON")
+
+
+def test_no_repeat_sends_every_sensor_again_on_each_connect(broker: Broker, tmp_path: Path) -> None:
+    source = FakeResults({"a": OCCUPIED, "b": CLEAR})
+    with publishing(source, on_off(broker, tmp_path, 0)):
+        with subscribed(broker) as subscriber:
+            wait_for(lambda: subscriber.on("t/a") and subscriber.on("t/b"))
+        broker.stop()
+        broker.start()  # The publisher tries again after 1 s, and this subscriber is up by then.
+        with subscribed(broker) as subscriber:
+            wait_for(lambda: subscriber.on("t/a") and subscriber.on("t/b"))
+            assert (payloads(subscriber, "t/a"), payloads(subscriber, "t/b")) == ([b"ON"], [b"OFF"])
+
+
+def test_a_profile_that_repeats_sends_a_change_whose_payload_is_unchanged(
+    broker: Broker, tmp_path: Path
+) -> None:
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, on_off(broker, tmp_path, 60)):
+        subscriber.wait_for(lambda m: m.topic == "t/a")
+        source.show({"a": NO_FRAMES})
+        wait_for(lambda: len(subscriber.on("t/a")) == 2)
+        assert payloads(subscriber) == [b"ON", b"ON"]

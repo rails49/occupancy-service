@@ -213,6 +213,8 @@ class Publisher:
         self._lock = threading.Lock()
         self._last: dict[str, dict[str, LastMessage]] = {}
         self._refused: set[tuple[str, str]] = set()
+        # The topic and payload last sent, by profile name and sensor, on a profile with no repeat.
+        self._sent: dict[tuple[str, str], tuple[str, bytes]] = {}
         self._stopping = threading.Event()
         self._shared: _Connection | None = None
         self._per_sensor: dict[tuple[str, str], _Connection] = {}  # By profile name and sensor.
@@ -242,7 +244,7 @@ class Publisher:
             client_id = f"occupancy-service-{secrets.token_hex(4)}"
             self._shared = _Connection(self._settings, client_id, "shared")
         now = time.monotonic()
-        due = {profile.name: now + profile.repeat for profile in self._profiles}
+        due = {p.name: now + p.repeat for p in self._profiles if p.repeat > 0}
         try:
             while not self._stopping.is_set():
                 self._serve_once(subscription, due)
@@ -270,7 +272,7 @@ class Publisher:
             self._send_change(change)
         self._end_holds(subscription)
         now = time.monotonic()
-        repeating = [profile for profile in self._profiles if due[profile.name] <= now]
+        repeating = [p for p in self._profiles if p.name in due and due[p.name] <= now]
         if repeating:
             self._send_all(repeating)
         for profile in repeating:
@@ -299,6 +301,9 @@ class Publisher:
         for key, profile in wanted.items():
             if key not in self._per_sensor:
                 self._per_sensor[key] = self._connect(profile, key[1], result.archive_id)
+        if any(sensor not in result.l1 for _, sensor in self._sent):
+            # So a sensor a reload adds back goes out on its first change.
+            self._sent = {key: sent for key, sent in self._sent.items() if key[1] in result.l1}
 
     def _connect(self, profile: Profile, sensor: str, archive_id: str | None) -> _Connection:
         topic = profile.topic_for(sensor, archive_id)
@@ -316,12 +321,12 @@ class Publisher:
         """What each connection carries, when it has just connected."""
         if self._shared is not None and self._shared.fresh.is_set():
             self._shared.fresh.clear()
-            self._send_all(self._shared_profiles)
+            self._send_all(self._shared_profiles, fresh=True)
         for (name, sensor), connection in self._per_sensor.items():
             if connection.fresh.is_set() and sensor in result.l1:
                 connection.fresh.clear()
                 profile = next(p for p in self._per_sensor_profiles if p.name == name)
-                self._report(profile, sensor, result.l1[sensor], result)
+                self._report(profile, sensor, result.l1[sensor], result, fresh=True)
 
     def _send_change(self, change: L1Change) -> None:
         result = self._source.latest()
@@ -352,20 +357,29 @@ class Publisher:
                 if hold.release(sensor, entry, captured_at):
                     self._send(profile, sensor, entry, result.archive_id)
 
-    def _send_all(self, profiles: list[Profile], stopping: bool = False) -> None:
-        """Every sensor in the newest result, on ``profiles``."""
+    def _send_all(
+        self, profiles: list[Profile], stopping: bool = False, fresh: bool = False
+    ) -> None:
+        """Every sensor in the newest result, on ``profiles``. ``fresh`` for a new connection."""
         result = self._source.latest()
         self._forget_all_but(result.l1)
         for profile in profiles:
             for sensor, entry in result.l1.items():
-                self._report(profile, sensor, _STOPPED if stopping else entry, result)
+                self._report(profile, sensor, _STOPPED if stopping else entry, result, fresh)
 
-    def _report(self, profile: Profile, sensor: str, entry: L1Entry, result: L1Result) -> None:
+    def _report(
+        self,
+        profile: Profile,
+        sensor: str,
+        entry: L1Entry,
+        result: L1Result,
+        fresh: bool = False,
+    ) -> None:
         """Sends ``entry``, or on a profile holding this sensor what that profile last reported."""
         hold = self._holds.get(profile.name)
         if hold is not None:
             entry = hold.report(sensor, entry, _captured_at(result))
-        self._send(profile, sensor, entry, result.archive_id)
+        self._send(profile, sensor, entry, result.archive_id, fresh)
 
     def _connection(
         self, profile: Profile, sensor: str, archive_id: str | None
@@ -378,7 +392,14 @@ class Publisher:
             connection if connection is not None and connection.archive_id == archive_id else None
         )
 
-    def _send(self, profile: Profile, sensor: str, entry: L1Entry, archive_id: str | None) -> None:
+    def _send(
+        self,
+        profile: Profile,
+        sensor: str,
+        entry: L1Entry,
+        archive_id: str | None,
+        fresh: bool = False,
+    ) -> None:
         if archive_id is None and profile.needs_archive_id:
             return
         if profile.topic_for(sensor, archive_id) is None:
@@ -392,7 +413,7 @@ class Publisher:
             return
         connection = self._connection(profile, sensor, archive_id)
         if connection is not None:
-            self._publish(connection, profile, sensor, entry, archive_id)
+            self._publish(connection, profile, sensor, entry, archive_id, fresh)
 
     def _publish(
         self,
@@ -401,15 +422,24 @@ class Publisher:
         sensor: str,
         entry: L1Entry,
         archive_id: str | None,
+        fresh: bool = False,
     ) -> None:
+        """Sends ``entry`` on ``connection``. On a profile with no repeat, only what differs from
+        what went last, unless ``fresh``: a new connection sends everything it carries."""
         # Not while it is down: paho would keep a QoS 1 or 2 message, and send it stale later.
         topic = profile.topic_for(sensor, archive_id)
         if topic is None or not connection.is_connected():
             return  # Each new connection sends what it carries.
         message = profile.message_for(sensor, entry)
-        sent = connection.client.publish(topic, encode(message), profile.qos, profile.retain)
+        body = encode(message)
+        key = (profile.name, sensor)
+        if profile.repeat == 0 and not fresh and self._sent.get(key) == (topic, body):
+            return
+        sent = connection.client.publish(topic, body, profile.qos, profile.retain)
         if sent.rc != MQTTErrorCode.MQTT_ERR_SUCCESS:
             return  # The connection has just ended, and the next one sends what it carries.
+        if profile.repeat == 0:
+            self._sent[key] = (topic, body)
         with self._lock:
             by_profile = self._last.setdefault(sensor, {})
             by_profile[profile.name] = LastMessage(message, datetime.now(UTC))
