@@ -17,7 +17,7 @@ bin/install-hooks.sh    # refuse commits on main, and run the gate before each p
 uv run python -m occupancy_service --archive <path> --camera /dev/video0 --broker <host>:<port>
 ```
 
-This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stderr. The camera's size is the manifest's `camera.resolution`, read once at the start, so a reload that changes it needs a restart.
+This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stderr. With `--detector-model`, `L1Loop` also runs the [detector](#l0). The camera's size is the manifest's `camera.resolution`, read once at the start, so a reload that changes it needs a restart.
 
 | Flag | Goes to | Default |
 | :--- | :--- | :--- |
@@ -30,6 +30,9 @@ This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stder
 | `--engine` | `L1Settings.engine` | `onnxruntime` |
 | `--device` | `L1Settings.device` | `CPU` |
 | `--frame-rate` | `CaptureSettings.frame_rate` | `20` |
+| `--detector-model` | `L1Settings.detector_model` | None: no detector |
+| `--detector-engine` | `L1Settings.detector_engine` | `onnxruntime` |
+| `--detector-device` | `L1Settings.detector_device` | `CPU` |
 
 Each of these refuses the process: it exits 1 with one line on stderr, with no `ffmpeg` started and no port left bound. A flag that argparse refuses, such as a malformed `--broker`, exits 2.
 
@@ -42,6 +45,7 @@ None of these refuses it. The process starts, and the parts report and recover a
 - A camera that is absent: sensors read `no frames`.
 - A broker that is absent: it is retried, and `latest` answers meanwhile.
 - A model that does not load: sensors read `no model`.
+- A detector model that does not load, or a `--detector-model` with `rails49-detector` not installed: `latest` says so in [`detector`](LIVE.md#optional-fields), and L1 comes from the classifier alone.
 - A manifest with no `id`: sensors read `archive has no id`.
 
 SIGTERM and SIGINT both stop the parts and exit 0. `service stopped` goes out for every sensor while a broker is connected, and no `ffmpeg` is left behind.
@@ -59,7 +63,7 @@ uv run live-check --save http://localhost:8000/live    # also rewrites manifest.
 
 The `openvino` engine needs the `openvino` extra (`uv sync --extra openvino`). The dev group holds it too, so the tests run it on the CPU. onnxruntime runs only on the CPU, and any other device reads `no model`.
 
-At or above the model's threshold a sensor is `occupied`, and below it `clear`. There is no smoothing across frames. A sensor is `unknown`, with one of these reasons, the first that applies:
+At or above the model's threshold a sensor is `occupied`, and below it `clear`. There is no smoothing across frames. With the detector, [L0](#l0) is combined with this, and can make a sensor `occupied`, or answer `no track` and `no model`. A sensor is `unknown`, with one of these reasons, the first that applies:
 
 | Reason | When |
 | :--- | :--- |
@@ -74,6 +78,31 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 | `outside the frame` | The classifier returned `None` for the sensor. |
 
 **The turnout limit:** a sensor near a turnout is scored like any other, but the training data leaves such positions out, so the classifier's accuracy there is not known. The service does not detect these sensors, and reports nothing special for them.
+
+## L0
+
+The detector is `rails49-detector`, which is AGPL and installed separately: no dependency of this package names it, and CI installs it nowhere. `occupancy_service.detector_model` is the one module that imports it, and only when `L1Settings.detector_model` is set. With that empty, the default, the service runs as it would without the detector. The image's build argument for installing it belongs to rails49/occupancy-service#6.
+
+The model loads once, at start, as the classifier's does, and a restart tries again. `latest` reports the load in `detector`: `ok`, or `failed` with the reason. A detector that raises or hangs after a good load stays `ok`: its L0 goes stale, `l0_age_ms` grows, and the log says why.
+
+The detector runs on its own thread, so it never holds up the classifier: it takes the newest frame, runs, and waits `detect_every` (1 s). `detector_engine` and `detector_device` are its own settings. With no DPT, or a frame not at `camera.resolution`, there is no run and no L0. `timings` reports `detect_ms`, `l0_rate_fps` and `l0_age_ms`.
+
+Each classifier result is combined with the newest L0 no older than `l0_limit` (5 s), when the result is read, so a reload takes effect with no new run. Past the limit the detector says nothing, and `latest` has no `l0`. Results that are not the classifier's, such as `no frames` or `drift`, are not combined.
+
+The detector says a sensor is occupied when the sensor lies strictly inside a box. A box keeps a detection's centre and angle, takes the car width, `DPT × 3150 / 1435`, in place of the predicted width, and is `margin_g` (2 G) longer at both ends. Where several boxes cover it, the highest confidence wins. A sensor in the frame and in no box is clear, and the detector says nothing of a sensor outside the frame. [`conformance/l1.json`](LIVE.md#l1-cases) holds these cases, for rails49/occupancy#337 to share.
+
+| Classifier | Detector | L1 |
+| :--- | :--- | :--- |
+| `occupied` | any | `occupied` with the higher confidence |
+| any answer but the reasons in the last row | `occupied` | `occupied` |
+| `clear` | `clear`, or no fresh L0 | `clear` |
+| `no track` or `no model` | `clear` | `clear` |
+| `no track` or `no model` | no fresh L0 | `unknown` with the classifier's reason |
+| `no frames`, `scoring stalled`, `wrong frame size`, `DPT unresolved`, `outside the frame`, `archive has no id` | any | `unknown` with the classifier's reason |
+
+`drift` stands over all of these, as in [L1](#l1).
+
+The own-vocabulary [profile](#profile-files) publishes each L0 on `occupancy/<archive id>/l0`.
 
 ## Drift
 
@@ -284,4 +313,4 @@ Rocrail does not notice a hung service whose connections stay up, nor a lost bro
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
 
-The L1 tests use a fake capture source and the packaged model, on the CPU. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.
+The L1 tests use a fake capture source and the packaged model, on the CPU. The detector's tests use a fake detector, and the tests of the command a fake `detector` module on the child's path, so no AGPL package is installed. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.
