@@ -300,14 +300,16 @@ class L1Loop:
         scorer: Scorer | None = None,
         make_drift_check: Callable[[Gray], Check] = DriftCheck,
     ) -> None:
-        """Reads the manifest, and raises what ``r49.load`` raises when it cannot be read.
+        """Reads the manifest, and raises what ``r49.load`` raises when it cannot be read. The
+        model the settings name loads in ``start()``.
 
         ``scorer`` stands in for the model the settings name, and ``make_drift_check`` for the
         drift check.
         """
         self._settings = settings
         self._source = source
-        self._scorer = scorer if scorer is not None else self._load_scorer()
+        self._scorer = scorer
+        self._model_to_load = scorer is None
         self._lock = threading.Lock()
         self._drift = (
             None
@@ -317,6 +319,7 @@ class L1Loop:
             )
         )
         archive = r49.load(settings.archive)
+        self._manifest = archive.manifest
         self._geometry = self._geometry_from(archive)
         if self._drift is not None:
             self._drift.use(archive, self._geometry.dpt)
@@ -335,6 +338,14 @@ class L1Loop:
             self._advance()
 
     def start(self) -> None:
+        if self._model_to_load:
+            scorer = self._load_scorer()
+            with self._lock:
+                self._scorer = scorer
+                self._model_to_load = False
+                if scorer is None:
+                    self._geometry = self._geometry_of(self._manifest)
+                    self._advance()
         self._stopping.clear()
         self._threads = [
             threading.Thread(target=self._run, name="l1", daemon=True),
@@ -378,6 +389,7 @@ class L1Loop:
         archive = r49.load(self._settings.archive)
         geometry = self._geometry_from(archive)
         with self._lock:
+            self._manifest = archive.manifest
             self._geometry = geometry
             if self._drift is not None:
                 self._drift.use(archive, geometry.dpt)
@@ -414,9 +426,11 @@ class L1Loop:
             return None
 
     def _geometry_from(self, archive: r49.R49Archive) -> _Geometry:
-        return _geometry_of(
-            archive.manifest, self._settings.no_track_limit_g, self._scorer is not None
-        )
+        return self._geometry_of(archive.manifest)
+
+    def _geometry_of(self, manifest: r49.Manifest) -> _Geometry:
+        has_model = self._scorer is not None or self._model_to_load
+        return _geometry_of(manifest, self._settings.no_track_limit_g, has_model)
 
     def _run(self) -> None:
         scored_id: int | None = None
