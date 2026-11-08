@@ -308,3 +308,15 @@ def test_the_jmri_profile_says_what_jmri_reads() -> None:
     assert profile.message_for("C3.A", UNKNOWN) == "ACTIVE"
     assert profile.will_for("C3.A") == "ACTIVE"
     assert profile.clear_hold_s == 0
+
+
+def test_the_rocrail_profile_says_what_rocrail_reads() -> None:
+    profile = load_profile("rocrail")
+    assert (profile.retain, profile.qos, profile.repeat) == (False, 1, 0)
+    assert (profile.connection, profile.will_state) == ("per_sensor", "unknown")
+    assert profile.topic_for("C3.A", None) == "rocrail/service/field"
+    assert profile.message_for("C3.A", OCCUPIED) == '<fb id="C3.A" state="true"/>'
+    assert profile.message_for("C3.A", CLEAR) == '<fb id="C3.A" state="false"/>'
+    assert profile.message_for("C3.A", UNKNOWN) == '<fb id="C3.A" state="true"/>'
+    assert profile.will_for("C3.A") == '<fb id="C3.A" state="true"/>'
+    assert profile.clear_hold_s == 0
