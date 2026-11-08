@@ -69,19 +69,49 @@ A classifier's number for a clear sensor goes in the optional `scores`.
 
 ### Optional fields
 
-Everything except `l0`, `drift` and `last_messages` comes from the served frame.
+Everything except `l0`, `detector`, `drift`, `last_messages` and the `timings` of L0 comes from the served frame.
 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
-| `l0` | object | The newest L0. It has its own `frame_id` and `captured_at`, because the detector runs slower than the camera. rails49/occupancy-service#8 defines the rest of it. |
+| `l0` | object | The newest L0 that is fresh enough to count. See [L0](#l0). |
+| `detector` | object | Whether the detector loaded: `{ "state": "ok" }`, or `{ "state": "failed", "reason": <non-empty string> }`. Present only on a service set up to run one. |
 | `scores` | object | Sensor id to P(occupied), from 0 to 1. |
 | `threshold` | number from 0 to 1 | The number a score is compared with. |
 | `patches` | object | Sensor id to the name of a part in this answer, such as `patch-0`, a different part for each sensor. A sensor with no patch has no entry. Sent only in answer to `?patches=1`. |
 | `changes` | object | Sensor id to the count of L1 changes, an integer from 0. |
-| `timings` | object | Any of `capture_ms`, `decode_ms`, `cut_ms`, `classify_ms` and `rate_fps`, each a number from 0. |
+| `timings` | object | Any of `capture_ms`, `decode_ms`, `cut_ms`, `classify_ms`, `rate_fps`, `detect_ms`, `l0_rate_fps` and `l0_age_ms`, each a number from 0. The last three are the detector's: its newest run, its rate of runs, and the age of its newest L0, however old. |
 | `camera` | object | Any of `state` (`ok` or `lost`), `rate_fps` and `frame_age_ms`, the last two numbers from 0. |
 | `drift` | object | How far the camera has moved, from its own sampled frame. See [Drift](#drift). |
 | `last_messages` | object | Sensor id to profile name to `{ message, time }`: the last message that profile published for that sensor, and when. A sensor or a profile with nothing published has no entry. `message` is an object for a payload sent as JSON and a string for one sent as text. `time` has the form of `captured_at`. |
+
+### L0
+
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `frame_id` | non-empty string | The id of L0's own frame, in the form of the top-level `frame_id`. It differs from the served frame when the detector is slower than the camera. |
+| `captured_at` | RFC 3339 time with an offset | When L0's frame reached the service. |
+| `detections` | list | One object per car the detector found, as below. An empty list means the detector ran and found nothing. |
+
+| Detection field | Type | Meaning |
+| :--- | :--- | :--- |
+| `centre` | `{ x, y }`, two numbers | The box's centre. It may lie outside the frame. |
+| `length`, `width` | numbers from 0 | The box's size. `width` is the model's own prediction. |
+| `angle` | number | The direction of `length`, in radians, as a track's heading. |
+| `class` | non-empty string | What the detector says the car is. |
+| `confidence` | number from 0 to 1 | How sure the detector is. |
+
+Positions and sizes are `camera.resolution` pixels, as the detector's SPEC states. An absent `l0` means there is no fresh L0: no detector, none yet, or the newest older than the service's limit.
+
+#### L1 cases
+
+[`conformance/l1.json`](conformance/l1.json) holds cases of what detections say about each sensor, for an implementation to run in its own tests. It covers the geometry of detections only. How the service combines them with its classifier is in the [README](README.md#l0).
+
+| Key | Holds |
+| :--- | :--- |
+| `standard_width_mm`, `standard_gauge_mm` | The prototype's car width and gauge. |
+| `cases` | A list of `{ name, width, height, dpt, car_width, margin_g, detections, sensors, expected }`. `width` and `height` are the frame's. `detections` are as in [L0](#l0). `sensors` maps an id to `{ x, y }`. |
+
+A box keeps a detection's centre and angle, takes `car_width` in place of the detection's width, and is `margin_g × dpt` pixels longer at both ends. `car_width` is `dpt × standard_width_mm / standard_gauge_mm`. A sensor strictly inside a box is `occupied`, with the highest `confidence` of the boxes it is in, a sensor in the frame and in no box is `clear`, and a sensor outside the frame is `unknown`. An implementation passes a case when it gives each sensor in `expected` its `state`, and its `confidence` when `occupied`.
 
 `patches` maps ids to part names because a sensor id is any non-empty string, and a part name cannot carry one safely: browsers return a `"` written as `%22` as those three characters.
 
@@ -105,12 +135,19 @@ Content-Type: application/json
     "C3.A": { "state": "occupied", "confidence": 0.93 },
     "C3.B": { "state": "clear" }
   },
-  "l0": { "frame_id": "f-1040", "captured_at": "2026-11-05T10:15:29.991Z" },
+  "l0": {
+    "frame_id": "f-1040",
+    "captured_at": "2026-11-05T10:15:29.991Z",
+    "detections": [
+      { "centre": { "x": 412.5, "y": 630 }, "length": 160, "width": 41.5, "angle": 0.02, "class": "passenger", "confidence": 0.88 }
+    ]
+  },
+  "detector": { "state": "ok" },
   "scores": { "C3.A": 0.93, "C3.B": 0.02 },
   "threshold": 0.5,
   "patches": { "C3.A": "patch-0", "C3.B": "patch-1" },
   "changes": { "C3.A": 4, "C3.B": 3 },
-  "timings": { "capture_ms": 2.5, "decode_ms": 11, "cut_ms": 1.25, "classify_ms": 30, "rate_fps": 14.5 },
+  "timings": { "capture_ms": 2.5, "decode_ms": 11, "cut_ms": 1.25, "classify_ms": 30, "rate_fps": 14.5, "detect_ms": 640, "l0_rate_fps": 0.6, "l0_age_ms": 134 },
   "camera": { "state": "ok", "rate_fps": 15, "frame_age_ms": 20 },
   "drift": { "px": 2, "tolerance_px": 9.75, "past": false },
   "last_messages": {
@@ -262,7 +299,7 @@ It exits non-zero and names each broken rule. It accepts an implementation that 
 
 With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. Without the flag it writes nothing.
 
-It checks format and consistency only, so it does not run the [drift cases](#drift-cases). Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
+It checks format and consistency only, so it does not run the [drift cases](#drift-cases) or the [L1 cases](#l1-cases). Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
 
 | Rule | Broken by |
 | :--- | :--- |
@@ -290,7 +327,8 @@ It checks format and consistency only, so it does not run the [drift cases](#dri
 | `l1/clear-confidence` | `clear` with a `confidence`. |
 | `l1/unknown-reason` | `unknown` with no non-empty `reason`. |
 | `l1/unknown-confidence` | `unknown` with a `confidence`. |
-| `optional/l0` | `l0` has the wrong shape. |
+| `optional/l0` | `l0` has the wrong shape, or a detection in it does. |
+| `optional/detector` | `detector` has the wrong shape. |
 | `optional/scores` | `scores` has the wrong shape, or names a sensor not in the manifest. |
 | `optional/threshold` | `threshold` has the wrong shape. |
 | `optional/patches` | `patches` has the wrong shape, or names a sensor not in the manifest. |

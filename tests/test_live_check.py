@@ -218,8 +218,18 @@ def every_optional_field() -> dict[str, Any]:
         "l0": {
             "frame_id": "f-40",
             "captured_at": "2026-11-05T10:15:29.900+01:00",
-            "detections": [],
+            "detections": [
+                {
+                    "centre": {"x": -3.5, "y": 120},
+                    "length": 96,
+                    "width": 30.5,
+                    "angle": -1.5,
+                    "class": "passenger",
+                    "confidence": 0.81,
+                }
+            ],
         },
+        "detector": {"state": "ok"},
         "scores": {"C3.A": 0.93, 'say "hi"': 0.02},
         "threshold": 0.5,
         "changes": {"C3.A": 4, 'say "hi"': 0},
@@ -229,6 +239,9 @@ def every_optional_field() -> dict[str, Any]:
             "cut_ms": 1.25,
             "classify_ms": 30,
             "rate_fps": 14.5,
+            "detect_ms": 640,
+            "l0_rate_fps": 0.6,
+            "l0_age_ms": 1200,
         },
         "camera": {"state": "ok", "rate_fps": 15, "frame_age_ms": 20},
         "drift": {"px": 2.0, "tolerance_px": 8.25, "past": False},
@@ -244,8 +257,22 @@ def every_optional_field() -> dict[str, Any]:
     }
 
 
+def l0_with(**changes: Any) -> dict[str, Any]:
+    """An ``l0`` whose one detection has ``changes``, a value of None leaving that key out."""
+    detection = every_optional_field()["l0"]["detections"][0] | changes
+    detection = {key: value for key, value in detection.items() if value is not None}
+    return every_optional_field()["l0"] | {"detections": [detection]}
+
+
 def test_accepts_every_optional_field() -> None:
     assert failures(patched(latest_extra=every_optional_field())) == []
+
+
+def test_accepts_an_l0_with_no_detections_and_a_failed_detector() -> None:
+    fields = every_optional_field()
+    fields["l0"]["detections"] = []
+    fields["detector"] = {"state": "failed", "reason": "rails49-detector is not installed"}
+    assert failures(patched(latest_extra=fields)) == []
 
 
 def test_accepts_the_json_only_answer_with_optional_fields() -> None:
@@ -260,7 +287,23 @@ def test_accepts_the_json_only_answer_with_optional_fields() -> None:
         ("l0", []),
         ("l0", {"captured_at": "2026-11-05T10:15:29Z"}),
         ("l0", {"frame_id": "f-40"}),
-        ("l0", {"frame_id": "f-40", "captured_at": "soon"}),
+        ("l0", {"frame_id": "f-40", "captured_at": "soon", "detections": []}),
+        ("l0", {"frame_id": "f-40", "captured_at": "2026-11-05T10:15:29Z"}),
+        ("l0", l0_with(centre=[1, 2])),
+        ("l0", l0_with(centre={"x": 1})),
+        ("l0", l0_with(centre={"x": "1", "y": 2})),
+        ("l0", l0_with(length=-1)),
+        ("l0", l0_with(width=None)),
+        ("l0", l0_with(angle="north")),
+        ("l0", l0_with(**{"class": ""})),
+        ("l0", l0_with(confidence=1.5)),
+        ("detector", []),
+        ("detector", {}),
+        ("detector", {"state": "loaded"}),
+        ("detector", {"state": "failed"}),
+        ("detector", {"state": "failed", "reason": ""}),
+        ("timings", {"detect_ms": -1}),
+        ("timings", {"l0_age_ms": "old"}),
         ("scores", []),
         ("scores", {"C3.A": 1.5}),
         ("scores", {"C3.A": "high"}),

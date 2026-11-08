@@ -390,7 +390,33 @@ def _is_l0(value: Any) -> bool:
         isinstance(value, dict)
         and _is_text(value.get("frame_id"))
         and _is_time(value.get("captured_at"))
+        and isinstance(value.get("detections"), list)
+        and all(_is_detection(detection) for detection in value["detections"])
     )
+
+
+def _is_detection(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    centre: Any = value.get("centre")
+    return (
+        isinstance(centre, dict)
+        and _is_real(centre.get("x"))
+        and _is_real(centre.get("y"))
+        and _is_number(value.get("length"))
+        and _is_number(value.get("width"))
+        and _is_real(value.get("angle"))
+        and _is_text(value.get("class"))
+        and _is_number(value.get("confidence"), high=1)
+    )
+
+
+def _is_detector(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("state") == "failed":
+        return _is_text(value.get("reason"))
+    return value.get("state") == "ok"
 
 
 def _is_last_message(value: Any) -> bool:
@@ -407,13 +433,24 @@ def _is_by_profile(value: Any) -> bool:
 
 _OPTIONAL: dict[str, Callable[[Any, set[str]], bool]] = {
     "l0": lambda value, _: _is_l0(value),
+    "detector": lambda value, _: _is_detector(value),
     "scores": lambda value, sensors: _by_sensor(value, sensors, lambda v: _is_number(v, high=1)),
     "threshold": lambda value, _: _is_number(value, high=1),
     "patches": lambda value, sensors: _by_sensor(value, sensors, _is_patch_part)
     and len(set(value.values())) == len(value),
     "changes": lambda value, sensors: _by_sensor(value, sensors, _is_count),
     "timings": lambda value, _: _has_numbers(
-        value, ("capture_ms", "decode_ms", "cut_ms", "classify_ms", "rate_fps")
+        value,
+        (
+            "capture_ms",
+            "decode_ms",
+            "cut_ms",
+            "classify_ms",
+            "rate_fps",
+            "detect_ms",
+            "l0_rate_fps",
+            "l0_age_ms",
+        ),
     ),
     "camera": lambda value, _: _is_camera(value),
     "drift": lambda value, _: _is_drift(value),
@@ -423,6 +460,11 @@ _OPTIONAL: dict[str, Callable[[Any, set[str]], bool]] = {
 
 def _is_text(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
+
+
+def _is_real(value: Any) -> bool:
+    """A finite JSON number of either sign."""
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 def _is_time(value: Any) -> bool:

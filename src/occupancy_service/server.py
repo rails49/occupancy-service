@@ -26,7 +26,8 @@ from occupancy_service.archive_writer import MANIFEST as _MANIFEST
 from occupancy_service.archive_writer import ArchiveWriter, Refused, can_name, etag_of
 from occupancy_service.capture import CaptureStatus, Frame
 from occupancy_service.drift import DriftReading, DriftUnmeasured
-from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Stats
+from occupancy_service.l0 import L0, detection_json
+from occupancy_service.l1 import DetectorState, L1Entry, L1Loop, L1Result, L1Stats
 from occupancy_service.origin import is_own_page
 from occupancy_service.publisher import LastMessage
 
@@ -151,8 +152,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _latest(self, query: Mapping[str, list[str]]) -> None:
         result, stats, frame = self._read(query.get("after", [None])[0])
-        frame_id = None if frame is None else f"{self.live.run_id}-{frame.id}"
-        fields = _fields(result, stats, frame, frame_id)
+        fields = _fields(result, stats, frame, self.live.run_id)
         if self.live.last_messages is not None:
             fields["last_messages"] = _last_messages(self.live.last_messages(), result)
         parts = []
@@ -351,13 +351,12 @@ def _body_length(headers: Message) -> int | None:
     return int(length)
 
 
-def _fields(
-    result: L1Result, stats: L1Stats, frame: Frame | None, frame_id: str | None
-) -> dict[str, Any]:
-    """The JSON part, with what the service offers, without ``patches``."""
+def _fields(result: L1Result, stats: L1Stats, frame: Frame | None, run_id: str) -> dict[str, Any]:
+    """The JSON part, with what the service offers, without ``patches``. A frame's id is
+    ``<run_id>-<Frame.id>``."""
     fields: dict[str, Any] = {
         "version": 1,
-        "frame_id": frame_id,
+        "frame_id": None if frame is None else f"{run_id}-{frame.id}",
         "captured_at": None if frame is None else frame.arrived_at.isoformat(),
         "l1": {id: _entry(entry) for id, entry in result.l1.items()},
         "scores": {} if frame is None else {id: float(p) for id, p in result.scores.items()},
@@ -369,7 +368,25 @@ def _fields(
         fields["threshold"] = float(result.threshold)
     if result.drift is not None:
         fields["drift"] = _drift(result.drift)
+    if result.l0 is not None:
+        fields["l0"] = _l0(result.l0, run_id)
+    if stats.detector is not None:
+        fields["detector"] = _detector(stats.detector)
     return fields
+
+
+def _l0(l0: L0, run_id: str) -> dict[str, Any]:
+    return {
+        "frame_id": f"{run_id}-{l0.frame.id}",
+        "captured_at": l0.frame.arrived_at.isoformat(),
+        "detections": [detection_json(detection) for detection in l0.detections],
+    }
+
+
+def _detector(detector: DetectorState) -> dict[str, Any]:
+    if detector.state == "failed":
+        return {"state": "failed", "reason": detector.reason or "the detector did not load"}
+    return {"state": "ok"}
 
 
 def _last_messages(
@@ -402,8 +419,16 @@ def _drift(drift: DriftReading | DriftUnmeasured) -> dict[str, Any]:
 
 
 def _timings(stats: L1Stats, has_frame: bool) -> dict[str, float]:
-    """The rate, and with a frame served, that frame's stage times where it has them."""
+    """The rate, the detector's times where it has them, and with a frame served, that frame's
+    stage times where it has them."""
     timings = {"rate_fps": stats.rate_fps}
+    if stats.l0 is not None:
+        l0 = {
+            "detect_ms": stats.l0.detect_ms,
+            "l0_rate_fps": stats.l0.rate_fps,
+            "l0_age_ms": stats.l0.age_ms,
+        }
+        timings |= {name: value for name, value in l0.items() if value is not None}
     if has_frame:
         stages = {
             "capture_ms": stats.capture_ms,
