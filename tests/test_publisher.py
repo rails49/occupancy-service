@@ -127,6 +127,7 @@ def profile_file(
     clear: str = '{ state = "clear" }',
     unknown: str = '{ state = "unknown", reason = "{reason}" }',
     clear_hold_s: float = 0,
+    connection: str = "shared",
 ) -> str:
     """A profile that differs from the own-vocabulary one where a test needs it to."""
     path = folder / f"{name}.toml"
@@ -136,6 +137,7 @@ retain = {str(retain).lower()}
 qos = {qos}
 repeat = {repeat}
 clear_hold_s = {clear_hold_s}
+connection = "{connection}"
 [payload]
 occupied = {occupied}
 clear = {clear}
@@ -444,6 +446,27 @@ def test_a_new_set_of_sensors_and_a_new_id_are_reported_and_a_removed_sensor_is_
         "own/archive-2/kept",
         "own/archive-2/added",
     }
+
+
+def test_a_per_sensor_topic_with_the_archive_id_says_removed_on_the_old_one_when_it_changes(
+    broker: Broker, tmp_path: Path
+) -> None:
+    path = profile_file(tmp_path, topic="own/{archive_id}/{sensor}", connection="per_sensor")
+    source = FakeResults({"a": CLEAR})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        wait_for(lambda: subscriber.on("own/archive-1/a"))
+        changed_at = time.monotonic()
+        source.show({"a": CLEAR}, archive_id="archive-2")
+        removed = subscriber.wait_for(
+            lambda m: m.topic == "own/archive-1/a" and payload(m).get("state") == "unknown"
+        )
+        assert payload(removed) == {"state": "unknown", "reason": "sensor removed"}
+        assert removed.at > changed_at
+        assert payload(subscriber.wait_for(lambda m: m.topic == "own/archive-2/a")) == {
+            "state": "clear"
+        }
+        wait_for(lambda: disconnected_clients(broker) == ["occupancy-service-fast-archive-1-a"])
+        assert "occupancy-service-fast-archive-2-a" in connected_clients(broker)
 
 
 @pytest.mark.parametrize(
@@ -926,6 +949,26 @@ def test_jmri_connects_a_sensor_a_reload_adds_and_disconnects_one_it_removes(
         assert "occupancy-service-jmri-archive-1-added" in connected_clients(broker)
 
 
+def test_jmri_sends_a_clear_sensor_no_active_when_the_archive_id_changes(broker: Broker) -> None:
+    source = FakeResults({"clear": CLEAR, "busy": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "jmri")):
+        wait_for(lambda: subscriber.on(JMRI + "clear") and subscriber.on(JMRI + "busy"))
+        changed_at = time.monotonic()
+        source.show({"clear": CLEAR, "busy": OCCUPIED}, archive_id="archive-2")
+        wait_for(lambda: len(disconnected_clients(broker)) == 2)
+        subscriber.wait_for(lambda m: m.topic == JMRI + "clear" and m.at > changed_at)
+        time.sleep(0.5)
+        after = [m.payload for m in subscriber.on(JMRI + "clear") if m.at > changed_at]
+        assert after and set(after) == {b"INACTIVE"}
+        assert retained(broker, [JMRI + "clear"])[JMRI + "clear"].payload == b"INACTIVE"
+        assert sorted(disconnected_clients(broker)) == [
+            "occupancy-service-jmri-archive-1-busy",
+            "occupancy-service-jmri-archive-1-clear",
+        ]
+        new = ["occupancy-service-jmri-archive-2-busy", "occupancy-service-jmri-archive-2-clear"]
+        assert set(new) <= set(connected_clients(broker))
+
+
 def test_jmri_leaves_active_retained_on_a_clean_stop(broker: Broker) -> None:
     sensors = {"a": CLEAR, "b": CLEAR}
     topics = [JMRI + id for id in sensors]
@@ -1139,6 +1182,28 @@ def test_rocrail_connects_a_sensor_a_reload_adds_and_disconnects_one_it_removes(
             fb("removed", False),
             fb("removed", True),
         ]
+
+
+def test_rocrail_sends_a_clear_sensor_no_true_when_the_archive_id_changes(
+    broker: Broker,
+) -> None:
+    source = FakeResults({"clear": CLEAR, "busy": OCCUPIED})
+    with (
+        subscribed(broker, qos=1) as subscriber,
+        publishing(source, settings_for(broker, "rocrail")),
+    ):
+        wait_for(lambda: len(subscriber.on(ROCRAIL)) == 2)
+        changed_at = time.monotonic()
+        source.show({"clear": CLEAR, "busy": OCCUPIED}, archive_id="archive-2")
+        old = "occupancy-service-rocrail-archive-1-"
+        wait_for(lambda: sorted(disconnected_clients(broker)) == [old + "busy", old + "clear"])
+        new = "occupancy-service-rocrail-archive-2-"
+        wait_for(lambda: {new + "busy", new + "clear"} <= set(connected_clients(broker)))
+        subscriber.wait_for(lambda m: m.payload == fb("clear", False) and m.at > changed_at)
+        time.sleep(0.5)
+        after = [m.payload for m in on_rocrail(subscriber, "clear") if m.at > changed_at]
+        assert after == [fb("clear", False)]
+        assert fb("clear", True) not in [m.payload for m in on_rocrail(subscriber, "clear")]
 
 
 def test_rocrail_with_no_archive_id_reports_every_sensor_true(broker: Broker) -> None:
