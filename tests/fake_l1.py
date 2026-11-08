@@ -19,6 +19,7 @@ from PIL import Image
 
 from occupancy_service.capture import CaptureStatus, Frame
 from occupancy_service.drift import Gray
+from occupancy_service.l0 import Detection
 from occupancy_service.l1 import L1Loop, Scoring
 
 WIDTH, HEIGHT = 320, 240
@@ -181,3 +182,37 @@ class FakeChecks:
         if isinstance(self.px, Exception):
             raise self.px
         return self.px
+
+
+def detection(
+    x: float, y: float, length: float = 50, angle: float = 0, confidence: float = 0.8
+) -> Detection:
+    """A car the detector found, with a predicted width of 30 pixels."""
+    return Detection(x, y, length, 30, angle, "passenger", confidence)
+
+
+class FakeDetector:
+    """Answers each frame with ``detections``, and logs the frames it is asked about. With ``gate``
+    it waits there before it answers. ``error`` it raises instead."""
+
+    def __init__(
+        self, detections: Sequence[Detection] = (), gate: threading.Event | None = None
+    ) -> None:
+        self.detections = detections
+        self.gate = gate
+        self.error: Exception | None = None
+        self.started = threading.Semaphore(0)
+        self.dpts: list[float] = []
+
+    @property
+    def runs(self) -> int:
+        return len(self.dpts)
+
+    def detect(self, frame: npt.NDArray[np.uint8], dpt: float) -> Sequence[Detection]:
+        self.dpts.append(dpt)
+        self.started.release()
+        if self.gate is not None:
+            self.gate.wait()
+        if self.error is not None:
+            raise self.error
+        return list(self.detections)
