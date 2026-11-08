@@ -1,0 +1,15 @@
+# JMRI's MqttSensor: ACTIVE or INACTIVE, retained, on a topic JMRI's MQTT channel may prefix.
+topic = "track/sensor/{sensor}"
+retain = true
+qos = 0
+# A person who clicks the sensor in JMRI publishes retained on this topic, and the repeat undoes it.
+repeat = 1
+# One connection per sensor, so that a dead service leaves each sensor ACTIVE.
+connection = "per_sensor"
+will_state = "unknown"
+
+[payload]
+occupied = "ACTIVE"
+clear = "INACTIVE"
+# JMRI keeps the state it had for anything but ACTIVE or INACTIVE, so unknown must be one.
+unknown = "ACTIVE"

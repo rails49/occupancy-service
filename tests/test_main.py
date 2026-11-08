@@ -367,3 +367,59 @@ def test_sigterm_says_service_stopped_for_every_sensor(
     finally:
         subscriber.close()
     assert not any(is_alive(pid) for pid in pids)
+
+
+def killed(service: Service, camera: FakeFfmpeg) -> float:
+    """Kills the child with SIGKILL, and the ``ffmpeg`` it can no longer stop. It is frozen first
+    until what it sent has arrived, so that what arrives after the returned time is the broker's,
+    which may come before ``wait`` returns. The broker waits 1.5 keepalives, 7.5 s, to notice a
+    frozen one."""
+    pids = [start.pid for start in wait_for(camera.starts)]
+    service.process.send_signal(signal.SIGSTOP)
+    time.sleep(0.5)
+    died_at = time.monotonic()
+    assert stop(service, signal.SIGKILL) == -signal.SIGKILL
+    for pid in pids:
+        if is_alive(pid):
+            os.kill(pid, signal.SIGKILL)
+    return died_at
+
+
+def test_sigkill_leaves_active_retained_on_every_jmri_sensor(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path, broker: Broker
+) -> None:
+    broker.start()
+    subscriber = Subscriber(broker.port)
+    topics = [f"track/sensor/{id}" for id in SENSORS]
+    try:
+        with started(tmp_path, camera, archive, broker.port, "--profile", "jmri") as service:
+            wait_for(lambda: all(subscriber.on(topic) for topic in topics), 10)
+            died_at = killed(service, camera)
+        # Nothing of the service's sends after it died: these are the broker's, from each will.
+        for topic in topics:
+            will = subscriber.wait_for(lambda m, t=topic: m.topic == t and m.at > died_at)
+            assert will.payload == b"ACTIVE"
+    finally:
+        subscriber.close()
+    late = Subscriber(broker.port)
+    try:
+        for topic in topics:
+            kept = late.wait_for(lambda m, t=topic: m.topic == t)
+            assert (kept.payload, kept.retain) == (b"ACTIVE", True)
+    finally:
+        late.close()
+
+
+def test_sigkill_on_a_shared_profile_sends_no_will(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path, broker: Broker
+) -> None:
+    broker.start()
+    subscriber = Subscriber(broker.port)
+    try:
+        with started(tmp_path, camera, archive, broker.port) as service:
+            subscriber.wait_for(lambda m: m.topic == f"{OWN}s1", 10)
+            died_at = killed(service, camera)
+        time.sleep(1)
+        assert [m for m in subscriber.messages if m.at > died_at] == []
+    finally:
+        subscriber.close()
