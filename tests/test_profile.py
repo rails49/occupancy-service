@@ -222,7 +222,7 @@ def test_the_readme_shows_the_shipped_profiles_as_they_are() -> None:
     readme = (root / "README.md").read_text()
     examples = [tomllib.loads(block) for block in re.findall(r"```toml\n(.*?)```", readme, re.S)]
     shipped = root / "src" / "occupancy_service" / "profiles"
-    for name in ("occupancy", "control"):
+    for name in ("occupancy", "control", "jmri"):
         assert tomllib.loads((shipped / f"{name}.toml").read_text()) in examples
 
 

@@ -118,9 +118,9 @@ An `events` client that takes over 2 s over one write, or has over 1000 changes 
 
 ## MQTT
 
-`occupancy_service.publisher` publishes L1 as its active profiles say, over one `paho-mqtt` connection. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive of every connection (5 s), and the timeout of connecting (2 s). A broker gives up on a silent connection after one and a half keepalives, and then sends its [last will](#one-connection-per-sensor), so a will goes out within about 8 s of a host or a network failing. A killed process closes its connections, and the broker sends each will at once. The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them.
+`occupancy_service.publisher` publishes L1 as its active profiles say, over `paho-mqtt`: one connection for every profile whose `connection` is `shared`, and [one per sensor](#one-connection-per-sensor) on each profile whose `connection` is `per_sensor`. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive of every connection (5 s), and the timeout of connecting (2 s). A broker gives up on a silent connection after one and a half keepalives, and then sends its [last will](#one-connection-per-sensor), so a will goes out within about 8 s of a host or a network failing. A killed process closes its connections, and the broker sends each will at once. The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them.
 
-Every sensor goes out on each connect and on each repeat, and each change goes out at once, except a `clear` that a profile [holds](#holding-clear). A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
+Every sensor goes out on each connect of the connection that carries it and on each repeat, and each change goes out at once, except a `clear` that a profile [holds](#holding-clear). A change is a new state or a new reason. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart.
 
 ### Profile files
 
@@ -134,10 +134,22 @@ A profile is a TOML file. The `profiles` setting names each by a shipped profile
 | `qos` | 0, 1 or 2. |
 | `repeat` | Seconds between sending every sensor, above 0. |
 | `clear_hold_s` | Optional. Seconds to [hold](#holding-clear) a `clear`, from 0. Absent or 0 means no hold. |
+| `connection` | Optional. `shared`, the default, or `per_sensor` for [one connection per sensor](#one-connection-per-sensor). |
+| `will_state` | Optional, and only with `per_sensor`. `occupied`, `clear` or `unknown`: the state whose payload is each sensor's last will, on that sensor's topic, with the profile's `retain` and `qos`. A `{reason}` in it is `connection lost`, and it cannot hold `{confidence}`. Absent means no will. |
 
 In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
 
 A topic that holds `{archive_id}` publishes nothing while the archive has no `id`. A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
+
+### One connection per sensor
+
+A profile with `connection = "per_sensor"` opens one connection for each sensor it can report, with the keepalive in `PublisherSettings` (5 s). Its client id is `occupancy-service-<profile>-<archive id>-<sensor>`, or `occupancy-service-<profile>-<sensor>` while the archive has no `id`. With a `will_state`, the broker publishes that state's payload on the sensor's topic when the connection ends without a clean disconnect: when the process is killed, or its host or network fails. A shared connection has no will.
+
+- A sensor a reload adds gets its connection with no restart, and sends its state once that connection is up.
+- A sensor a reload removes, or each sensor when the archive's `id` changes, sends `unknown` with the reason `sensor removed`, then disconnects cleanly, so the broker keeps that `unknown` where the profile is retained.
+- A clean stop sends `unknown` with the reason `service stopped` on each connection, then disconnects each cleanly.
+
+A hung process whose connections stay up sends nothing, and the broker sends no will, as its paho threads go on answering the keepalive. Only a profile's repeat stopping shows that.
 
 ### Holding `clear`
 
@@ -199,7 +211,35 @@ occupancy = "unknown"
 reason = "{reason}"
 ```
 
+`jmri`, for JMRI's MQTT sensors. It is not active by default:
+
+```toml
+topic = "track/sensor/{sensor}"
+retain = true
+qos = 0
+repeat = 1
+connection = "per_sensor"
+will_state = "unknown"
+
+[payload]
+occupied = "ACTIVE"
+clear = "INACTIVE"
+unknown = "ACTIVE"
+```
+
 A string payload is written the same way, as `clear = "OFF {sensor}"` under `[payload]`.
+
+### JMRI
+
+Turn it on with `--profile jmri`, or with `--profile occupancy --profile jmri` to keep the own vocabulary too. In JMRI, add an MQTT connection to the same broker, and add a sensor for each sensor in the archive. A sensor's `id` must be JMRI's name after `MS`, so `C3.A` is the sensor `MSC3.A`. JMRI's MQTT channel is blank by default since JMRI 5.1.2. If one is set, copy the profile to a file that puts the channel before `track/sensor/{sensor}`, and use that file.
+
+- `occupied` is `ACTIVE` and `clear` is `INACTIVE`. `unknown` is `ACTIVE` too: JMRI's `MqttSensor` takes only `ACTIVE` and `INACTIVE`, and for anything else logs a warning and keeps the state it had. A sensor JMRI cannot see is taken as occupied.
+- Each message is retained, so JMRI gets every sensor's state when it connects.
+- A person who clicks a sensor in JMRI publishes retained on the same topic. The repeat puts the service's state back within about 1 s.
+- Each sensor has its own connection, whose last will is `ACTIVE`. A service that is killed, or whose host or network fails, leaves every sensor `ACTIVE`: at once for a killed process, and within about 8 s for a failure the broker notices only by the keepalive. A clean stop and a removed sensor leave `ACTIVE` too.
+- With no archive `id`, every sensor reads `archive has no id`, which is `ACTIVE`.
+
+JMRI does not notice a hung service whose connections stay up: its sensors keep the last state the service sent.
 
 ## Test
 
