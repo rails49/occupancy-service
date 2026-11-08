@@ -231,3 +231,63 @@ def test_refuses_a_profile_that_does_not_exist(tmp_path: Path) -> None:
         load_profile("nothing-here")
     with pytest.raises(ProfileError, match="gone.toml"):
         load_profile(str(tmp_path / "gone.toml"))
+
+
+def test_a_profile_shares_one_connection_and_has_no_will_unless_it_says_so(tmp_path: Path) -> None:
+    profile = load_profile(str(write(tmp_path, VALID)))
+    assert profile.connection == "shared"
+    assert profile.will_state is None
+    assert profile.will_for("C3.A") is None
+
+
+def test_a_per_sensor_profile_names_the_state_its_will_says(tmp_path: Path) -> None:
+    text = VALID.replace(
+        "[payload]", 'connection = "per_sensor"\nwill_state = "unknown"\n[payload]'
+    )
+    profile = load_profile(str(write(tmp_path, text)))
+    assert profile.connection == "per_sensor"
+    assert profile.will_state == "unknown"
+    assert profile.will_for("C3.A") == "?"
+
+
+def test_a_will_fills_its_reason_with_connection_lost(tmp_path: Path) -> None:
+    text = VALID.replace(
+        "[payload]", 'connection = "per_sensor"\nwill_state = "unknown"\n[payload]'
+    )
+    text = text.replace('"?"', '{ id = "{sensor}", reason = "{reason}" }')
+    profile = load_profile(str(write(tmp_path, text)))
+    assert profile.will_for("C3.A") == {"id": "C3.A", "reason": "connection lost"}
+
+
+def test_a_per_sensor_profile_may_have_no_will(tmp_path: Path) -> None:
+    text = VALID.replace("[payload]", 'connection = "per_sensor"\n[payload]')
+    profile = load_profile(str(write(tmp_path, text)))
+    assert (profile.connection, profile.will_for("C3.A")) == ("per_sensor", None)
+
+
+@pytest.mark.parametrize(
+    ("lines", "complaint"),
+    [
+        ('connection = "each"', "connection"),
+        ("connection = 1", "connection"),
+        ('will_state = "unknown"', "will_state"),
+        ('connection = "shared"\nwill_state = "unknown"', "will_state"),
+        ('connection = "per_sensor"\nwill_state = "gone"', "will_state"),
+        ('connection = "per_sensor"\nwill_state = 1', "will_state"),
+    ],
+)
+def test_refuses_a_connection_or_will_it_cannot_use(
+    tmp_path: Path, lines: str, complaint: str
+) -> None:
+    path = write(tmp_path, VALID.replace("[payload]", f"{lines}\n[payload]"))
+    with pytest.raises(ProfileError, match=complaint):
+        load_profile(str(path))
+
+
+def test_refuses_a_will_whose_payload_needs_a_confidence(tmp_path: Path) -> None:
+    text = VALID.replace(
+        "[payload]", 'connection = "per_sensor"\nwill_state = "occupied"\n[payload]'
+    )
+    path = write(tmp_path, text.replace('"ON"', '"{confidence}"'))
+    with pytest.raises(ProfileError, match="confidence"):
+        load_profile(str(path))
