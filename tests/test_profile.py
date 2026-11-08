@@ -291,3 +291,15 @@ def test_refuses_a_will_whose_payload_needs_a_confidence(tmp_path: Path) -> None
     path = write(tmp_path, text.replace('"ON"', '"{confidence}"'))
     with pytest.raises(ProfileError, match="confidence"):
         load_profile(str(path))
+
+
+def test_the_jmri_profile_says_what_jmri_reads() -> None:
+    profile = load_profile("jmri")
+    assert (profile.retain, profile.qos, profile.repeat) == (True, 0, 1)
+    assert (profile.connection, profile.will_state) == ("per_sensor", "unknown")
+    assert profile.topic_for("C3.A", None) == "track/sensor/C3.A"
+    assert profile.message_for("C3.A", OCCUPIED) == "ACTIVE"
+    assert profile.message_for("C3.A", CLEAR) == "INACTIVE"
+    assert profile.message_for("C3.A", UNKNOWN) == "ACTIVE"
+    assert profile.will_for("C3.A") == "ACTIVE"
+    assert profile.clear_hold_s == 0

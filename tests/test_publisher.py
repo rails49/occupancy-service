@@ -831,3 +831,149 @@ def test_no_python_file_under_src_names_the_controller() -> None:
 
 def test_the_keepalive_is_5_s_by_default() -> None:
     assert PublisherSettings().keepalive == 5
+
+
+JMRI = "track/sensor/"
+STATES = (OCCUPIED, CLEAR, NO_FRAMES)
+
+
+def jmri_sensors(count: int) -> dict[str, L1Entry]:
+    """``count`` sensors, going round occupied, clear and unknown."""
+    return {f"s{number:02}": STATES[number % 3] for number in range(count)}
+
+
+def jmri_payload(entry: L1Entry) -> bytes:
+    return b"INACTIVE" if entry.state == "clear" else b"ACTIVE"
+
+
+def connected_clients(broker: Broker) -> list[str]:
+    """The id of every connection this service made, in the broker's log."""
+    return re.findall(r"New client connected from \S+ as (occupancy-service-\S+) ", read(broker))
+
+
+def disconnected_clients(broker: Broker) -> list[str]:
+    """Those that sent DISCONNECT: a broker logs that it "closed" any other."""
+    return re.findall(r"Client (occupancy-service-\S+) disconnected\.", read(broker))
+
+
+def read(broker: Broker) -> str:
+    return broker.log.read_text(errors="replace")
+
+
+def retained(broker: Broker, topics: list[str]) -> dict[str, Received]:
+    """The retained message on each of ``topics``, as a new subscriber gets it."""
+    with subscribed(broker) as late:
+        wait_for(lambda: all(late.on(topic) for topic in topics))
+        return {topic: late.on(topic)[0] for topic in topics}
+
+
+def test_jmri_sends_each_state_retained_on_50_connections(broker: Broker) -> None:
+    sensors = jmri_sensors(50)
+    source = FakeResults(sensors)
+    topics = [JMRI + id for id in sensors]
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "jmri")):
+        wait_for(lambda: all(subscriber.on(topic) for topic in topics), 10)
+        for id, entry in sensors.items():
+            assert {m.payload for m in subscriber.on(JMRI + id)} == {jmri_payload(entry)}
+        # A new subscriber gets every sensor's state, as the broker kept it.
+        late = retained(broker, topics)
+        for id, entry in sensors.items():
+            assert (late[JMRI + id].payload, late[JMRI + id].retain) == (jmri_payload(entry), True)
+        clients = connected_clients(broker)
+        assert sorted(clients) == sorted(f"occupancy-service-jmri-archive-1-{id}" for id in sensors)
+
+
+def test_jmri_corrects_a_wrong_retained_value_within_about_1_s(broker: Broker) -> None:
+    source = FakeResults({"a": OCCUPIED})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "jmri")):
+        subscriber.wait_for(lambda m: m.topic == JMRI + "a")
+        clicked = subscriber.client.publish(JMRI + "a", b"INACTIVE", retain=True)
+        clicked.wait_for_publish(5)
+        wrong = subscriber.wait_for(lambda m: m.payload == b"INACTIVE")
+        right = subscriber.wait_for(lambda m: m.at > wrong.at and m.payload == b"ACTIVE")
+        assert right.at - wrong.at < 1.25
+        assert retained(broker, [JMRI + "a"])[JMRI + "a"].payload == b"ACTIVE"
+
+
+def test_jmri_connects_a_sensor_a_reload_adds_and_disconnects_one_it_removes(
+    broker: Broker,
+) -> None:
+    source = FakeResults({"kept": CLEAR, "removed": CLEAR})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "jmri")):
+        wait_for(lambda: subscriber.on(JMRI + "kept") and subscriber.on(JMRI + "removed"))
+        source.show({"kept": CLEAR, "added": CLEAR})
+        subscriber.wait_for(lambda m: m.topic == JMRI + "added" and m.payload == b"INACTIVE")
+        subscriber.wait_for(lambda m: m.topic == JMRI + "removed" and m.payload == b"ACTIVE")
+        wait_for(lambda: "occupancy-service-jmri-archive-1-removed" in disconnected_clients(broker))
+        removed_at = time.monotonic()
+        time.sleep(1.2)  # Past a repeat.
+        assert not [m for m in subscriber.on(JMRI + "removed") if m.at > removed_at]
+        assert retained(broker, [JMRI + "removed"])[JMRI + "removed"].payload == b"ACTIVE"
+        assert disconnected_clients(broker) == ["occupancy-service-jmri-archive-1-removed"]
+        assert "occupancy-service-jmri-archive-1-added" in connected_clients(broker)
+
+
+def test_jmri_leaves_active_retained_on_a_clean_stop(broker: Broker) -> None:
+    sensors = {"a": CLEAR, "b": CLEAR}
+    topics = [JMRI + id for id in sensors]
+    with subscribed(broker) as subscriber:
+        with publishing(FakeResults(sensors), settings_for(broker, "jmri")):
+            wait_for(lambda: all(subscriber.on(topic) for topic in topics))
+        assert {m.payload for m in subscriber.messages if m.topic in topics} == {
+            b"INACTIVE",
+            b"ACTIVE",
+        }
+    assert {message.payload for message in retained(broker, topics).values()} == {b"ACTIVE"}
+    assert sorted(disconnected_clients(broker)) == [
+        "occupancy-service-jmri-archive-1-a",
+        "occupancy-service-jmri-archive-1-b",
+    ]
+
+
+def test_jmri_gives_a_restarted_broker_every_sensor_again(broker: Broker) -> None:
+    sensors = jmri_sensors(6)
+    topics = [JMRI + id for id in sensors]
+    with publishing(FakeResults(sensors), settings_for(broker, "jmri")):
+        retained(broker, topics)
+        broker.stop()
+        broker.start()  # It keeps nothing across the restart.
+        after = retained(broker, topics)
+    for id, entry in sensors.items():
+        assert after[JMRI + id].payload == jmri_payload(entry)
+
+
+def test_jmri_with_no_archive_id_reports_every_sensor_active(broker: Broker) -> None:
+    no_id = L1Entry("unknown", reason="archive has no id")
+    source = FakeResults({"a": no_id, "b": no_id}, archive_id=None)
+    with publishing(source, settings_for(broker, "jmri")):
+        late = retained(broker, [JMRI + "a", JMRI + "b"])
+    assert {message.payload for message in late.values()} == {b"ACTIVE"}
+    assert sorted(connected_clients(broker)) == [
+        "occupancy-service-jmri-a",
+        "occupancy-service-jmri-b",
+    ]
+
+
+def test_shared_profiles_open_one_connection_between_them(broker: Broker) -> None:
+    source = FakeResults(jmri_sensors(6))
+    settings = settings_for(broker, "occupancy", "control")
+    with subscribed(broker) as subscriber, publishing(source, settings):
+        wait_for(lambda: len(subscriber.on(CONTROL)) >= 6 and subscriber.on(OWN + "s05"))
+        assert len(connected_clients(broker)) == 1
+
+
+def test_a_stop_with_no_broker_returns_with_a_connection_per_sensor(broker: Broker) -> None:
+    broker.stop()
+    publisher = Publisher(settings_for(broker, "jmri"), FakeResults(jmri_sensors(20)))
+    publisher.start()
+    time.sleep(0.3)
+    started = time.monotonic()
+    publisher.stop()
+    assert time.monotonic() - started < 3
+
+
+def test_no_python_file_under_src_names_jmri() -> None:
+    src = Path(__file__).parent.parent / "src"
+    named = [path for path in src.rglob("*.py") if "jmri" in path.read_text().lower()]
+    assert named == []
+    assert len(list(src.rglob("*.py"))) > 3
