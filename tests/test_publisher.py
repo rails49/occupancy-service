@@ -827,3 +827,7 @@ def test_no_python_file_under_src_names_the_controller() -> None:
     named = [path for path in src.rglob("*.py") if "tc49" in path.read_text()]
     assert named == []
     assert len(list(src.rglob("*.py"))) > 3
+
+
+def test_the_keepalive_is_5_s_by_default() -> None:
+    assert PublisherSettings().keepalive == 5
