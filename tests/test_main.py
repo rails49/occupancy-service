@@ -184,6 +184,77 @@ def test_a_model_that_does_not_load_does_not_refuse_the_process(
         assert service.latest()["l1"]["s1"] == {"state": "unknown", "reason": "no model"}
 
 
+FAKE_PACKAGE = """
+from types import SimpleNamespace
+
+
+class Detector:
+    def __init__(self, model, engine, device):
+        if not model.exists():
+            raise FileNotFoundError(model)
+        self.engine = engine
+
+    def detect(self, frame, dpt):
+        height, width = frame.shape[:2]
+        found = dict(length=50, width=30, angle=0, cls=self.engine, confidence=0.75)
+        return [SimpleNamespace(x=width / 2, y=height / 2, **found)]
+"""
+
+
+def with_fake_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put a ``detector`` module on the child's path, as rails49-detector would be."""
+    folder = tmp_path / "site"
+    folder.mkdir()
+    (folder / "detector.py").write_text(FAKE_PACKAGE)
+    monkeypatch.setenv("PYTHONPATH", str(folder))
+
+
+def test_the_detector_model_flags_give_l0(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_fake_package(tmp_path, monkeypatch)
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"")
+    flags = ("--detector-model", str(model), "--detector-engine", "fake", "--detector-device", "X")
+    with started(tmp_path, camera, archive, None, *flags) as service:
+        answer = wait_for(lambda: (latest := service.latest()).get("l0") and latest, 30)
+        assert check(service.base, timeout=5) == []
+    assert answer["detector"] == {"state": "ok"}
+    assert answer["l0"]["detections"][0]["class"] == "fake"
+
+
+def test_with_no_detector_model_the_installed_package_is_not_used(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_fake_package(tmp_path, monkeypatch)
+    with started(tmp_path, camera, archive) as service:
+        answer = wait_for(lambda: (latest := service.latest()).get("frame_id") and latest, 30)
+    assert "detector" not in answer
+    assert "l0" not in answer
+
+
+def test_a_detector_model_that_does_not_load_does_not_refuse_the_process(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_fake_package(tmp_path, monkeypatch)
+    flags = ("--detector-model", str(tmp_path / "missing.onnx"))
+    with started(tmp_path, camera, archive, None, *flags) as service:
+        answer = wait_for(lambda: (latest := service.latest()).get("frame_id") and latest, 30)
+        assert check(service.base, timeout=5) == []
+    assert answer["detector"]["state"] == "failed"
+    assert "missing.onnx" in answer["detector"]["reason"]
+    assert "l0" not in answer
+
+
+def test_a_detector_model_with_no_package_does_not_refuse_the_process(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path
+) -> None:
+    flags = ("--detector-model", str(tmp_path / "model.onnx"))
+    with started(tmp_path, camera, archive, None, *flags) as service:
+        answer = wait_for(lambda: (latest := service.latest()).get("frame_id") and latest, 30)
+    assert answer["detector"] == {"state": "failed", "reason": "rails49-detector is not installed"}
+
+
 def test_a_manifest_with_no_id_does_not_refuse_the_process(
     tmp_path: Path, camera: FakeFfmpeg
 ) -> None:

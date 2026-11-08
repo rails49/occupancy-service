@@ -9,6 +9,7 @@ import logging
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Any, get_args
 
 import r49
@@ -69,6 +70,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine", choices=get_args(Engine), help="what runs the model")
     parser.add_argument("--device", help="the device the engine runs the model on")
     parser.add_argument("--frame-rate", type=float, help="the frames per second to ask the camera")
+    parser.add_argument(
+        "--detector-model",
+        type=Path,
+        help="the detector's model, which needs rails49-detector installed. Absent: no detector",
+    )
+    parser.add_argument("--detector-engine", help="what runs the detector's model")
+    parser.add_argument("--detector-device", help="the device that engine runs it on")
     return parser
 
 
@@ -89,8 +97,14 @@ def _built(args: argparse.Namespace) -> tuple[Capture, L1Loop, Publisher, LiveSe
         capture = Capture(
             CaptureSettings(resolution, device=args.camera, **_given(frame_rate=args.frame_rate))
         )
+        detector = _given(
+            detector_model=args.detector_model,
+            detector_engine=args.detector_engine,
+            detector_device=args.detector_device,
+        )
         loop = L1Loop(
-            L1Settings(args.archive, **_given(engine=args.engine, device=args.device)), capture
+            L1Settings(args.archive, **_given(engine=args.engine, device=args.device), **detector),
+            capture,
         )
     except Exception as error:  # What r49.load raises for a URL is the HTTP library's to choose.
         raise _Refused(f"cannot read the archive {args.archive}: {_one_line(error)}") from error
