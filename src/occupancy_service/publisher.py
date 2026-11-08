@@ -286,8 +286,10 @@ class Publisher:
 
     def _open_and_close(self, result: L1Result) -> None:
         """A connection for each sensor of ``result`` on each ``per_sensor`` profile that can
-        report it, opened with no restart. A sensor that goes, or whose archive ``id`` changes,
-        says ``unknown`` and disconnects cleanly."""
+        report it, opened with no restart. A connection whose archive ``id`` is not the newest one
+        disconnects cleanly. First it says ``unknown`` if its sensor has gone or its topic has
+        changed, as nothing will send on that topic again. A sensor that keeps its topic says
+        nothing, so a controller never sees a clear sensor go ``unknown`` and back for no reason."""
         wanted: dict[tuple[str, str], Profile] = {}
         for profile in self._per_sensor_profiles:
             if result.archive_id is None and profile.needs_archive_id:
@@ -298,7 +300,9 @@ class Publisher:
         for key, connection in list(self._per_sensor.items()):
             if key not in wanted or connection.archive_id != result.archive_id:
                 profile = next(p for p in self._per_sensor_profiles if p.name == key[0])
-                self._publish(connection, profile, key[1], _REMOVED, connection.archive_id)
+                topic = profile.topic_for(key[1], connection.archive_id)
+                if key not in wanted or profile.topic_for(key[1], result.archive_id) != topic:
+                    self._publish(connection, profile, key[1], _REMOVED, connection.archive_id)
                 connection.disconnect()
                 self._closed.append(connection)
                 del self._per_sensor[key]
