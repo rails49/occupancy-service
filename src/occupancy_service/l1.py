@@ -18,6 +18,7 @@ import numpy.typing as npt
 import r49
 from classifier.runtime import Engine
 
+from occupancy_service import detector_model
 from occupancy_service.capture import CaptureStatus, Frame, decode
 from occupancy_service.drift import (
     Check,
@@ -26,6 +27,16 @@ from occupancy_service.drift import (
     DriftReading,
     DriftUnmeasured,
     Gray,
+)
+from occupancy_service.l0 import (
+    L0,
+    Detector,
+    DetectorSays,
+    L0Loop,
+    L0Stats,
+    car_width,
+    detector_says,
+    is_fresh,
 )
 
 _log = logging.getLogger(__name__)
@@ -44,6 +55,8 @@ _OUTSIDE_THE_FRAME = "outside the frame"
 _NO_MODEL = "no model"
 _NO_ARCHIVE_ID = "archive has no id"
 _DRIFT = "drift"
+# The classifier's reasons for ``unknown`` that the detector may answer. Every other one stands.
+_DETECTOR_MAY_ANSWER = (_NO_TRACK, _NO_MODEL)
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,11 @@ class L1Settings:
     Scoring has stalled after ``stalled_after`` seconds with the camera fine and no new result.
     The drift check samples every ``drift_every`` seconds. Every sensor is ``unknown`` past
     ``drift_tolerance_g`` gauges, and None turns the check off.
+
+    With ``detector_model`` set, the detector loads from that path, runs on ``detector_engine``
+    and ``detector_device``, and waits ``detect_every`` seconds after each run. A result is
+    combined with the newest L0 no older than ``l0_limit`` seconds, and a box is ``margin_g``
+    gauges longer than its detection at both ends. None, the default, imports no detector.
     """
 
     archive: str | os.PathLike[str]
@@ -63,6 +81,12 @@ class L1Settings:
     stalled_after: float = 1.0
     drift_every: float = 3.0
     drift_tolerance_g: float | None = 0.5
+    detector_model: Path | None = None
+    detector_engine: str = "onnxruntime"
+    detector_device: str = "CPU"
+    detect_every: float = 1.0
+    l0_limit: float = 5.0
+    margin_g: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -81,7 +105,8 @@ class L1Result:
     ``frame`` is None with no frame to serve, and then ``scores`` and ``patches`` are empty. A
     sensor with no score or no patch has no entry in them. A patch is height × width × RGB, 8 bits.
     ``wrong_frame_size`` says ``frame`` is not at ``camera.resolution``. ``drift`` is the newest
-    reading, from a frame of its own, and None with the check turned off.
+    reading, from a frame of its own, and None with the check turned off. ``l0`` is the newest L0
+    no older than the limit, from a frame of its own, and None with none.
     """
 
     frame: Frame | None
@@ -92,6 +117,15 @@ class L1Result:
     archive_id: str | None
     wrong_frame_size: bool = False
     drift: DriftReading | DriftUnmeasured | None = None
+    l0: L0 | None = None
+
+
+@dataclass(frozen=True)
+class DetectorState:
+    """Whether the detector loaded: ``ok``, or ``failed`` with a ``reason``."""
+
+    state: Literal["ok", "failed"]
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +168,8 @@ class L1Stats:
 
     ``capture_ms`` runs from the frame reaching the service to the loop taking it. A time is None
     before any result, and ``cut_ms`` and ``classify_ms`` also when that result was not scored.
+    ``l0`` holds the detector's, and ``detector`` whether it loaded. Both are None with no
+    detector.
     """
 
     capture_ms: float | None
@@ -143,6 +179,8 @@ class L1Stats:
     rate_fps: float
     camera: CaptureStatus
     changes: Mapping[str, int]
+    l0: L0Stats | None = None
+    detector: DetectorState | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +249,7 @@ class _Geometry:
     whatever the frame shows, with its reason, and ``to_score`` the others."""
 
     sensor_ids: tuple[str, ...]
+    positions: Mapping[str, tuple[float, float]]
     archive_id: str | None
     size: tuple[int, int]
     dpt: float | None
@@ -240,6 +279,7 @@ def _geometry_of(manifest: r49.Manifest, no_track_limit_g: float, has_model: boo
                 to_score.append(classifier.Sensor(sensor.id, sensor.x, sensor.y, nearest.heading))
     return _Geometry(
         sensor_ids=tuple(sensor.id for sensor in sensors),
+        positions={sensor.id: (sensor.x, sensor.y) for sensor in sensors},
         archive_id=manifest.id,
         size=(resolution.width, resolution.height),
         dpt=dpt,
@@ -264,6 +304,20 @@ class _Scored:
     wrong_frame_size: bool = False
 
 
+def combine(entry: L1Entry, detector: DetectorSays | None) -> L1Entry:
+    """One sensor's L1 from the classifier's ``entry`` and what the detector says, None with no
+    fresh L0 or with the sensor outside the frame. The README's table states the rules."""
+    if entry.state == "unknown" and entry.reason not in _DETECTOR_MAY_ANSWER:
+        return entry
+    if detector is not None and detector.occupied:
+        return L1Entry(
+            "occupied", confidence=max(entry.confidence or 0.0, detector.confidence or 0.0)
+        )
+    if entry.state != "unknown":
+        return entry
+    return L1Entry("clear") if detector is not None else entry
+
+
 def _entry(p_occupied: float | None, threshold: float) -> L1Entry:
     if p_occupied is None:
         return L1Entry("unknown", reason=_OUTSIDE_THE_FRAME)
@@ -286,17 +340,21 @@ class L1Loop:
         source: CaptureSource,
         scorer: Scorer | None = None,
         make_drift_check: Callable[[Gray], Check] = DriftCheck,
+        detector: Detector | None = None,
     ) -> None:
         """Reads the manifest, and raises what ``r49.load`` raises when it cannot be read. The
         model the settings name loads in ``start()``.
 
         ``scorer`` stands in for the model the settings name, and ``make_drift_check`` for the
-        drift check.
+        drift check. ``detector`` stands in for the detector model the settings name.
         """
         self._settings = settings
         self._source = source
         self._scorer = scorer
         self._model_to_load = scorer is None
+        self._detector = detector
+        self._detector_state: DetectorState | None = None
+        self._l0_loop: L0Loop | None = None
         self._lock = threading.Lock()
         self._drift = (
             None
@@ -333,6 +391,7 @@ class L1Loop:
                 if scorer is None:
                     self._geometry = self._geometry_of(self._manifest)
                     self._advance()
+        self._start_detector()
         self._stopping.clear()
         self._threads = [
             threading.Thread(target=self._run, name="l1", daemon=True),
@@ -347,6 +406,9 @@ class L1Loop:
         self._stopping.set()
         if self._drift is not None:
             self._drift.stop()
+        if self._l0_loop is not None:
+            self._l0_loop.stop()
+            self._l0_loop = None
         for thread in self._threads:
             thread.join(_JOIN_WAIT)
         self._threads = []
@@ -395,6 +457,7 @@ class L1Loop:
             self._forget_results(now)
             count = len(self._results_at)
             rate = (count - 1) / (now - self._results_at[0]) if count > 1 else 0.0
+            l0_stats = self._l0_loop.newest()[1] if self._l0_loop is not None else None
             return result, L1Stats(
                 capture_ms=times.capture_ms if times is not None else None,
                 decode_ms=times.decode_ms if times is not None else None,
@@ -403,7 +466,56 @@ class L1Loop:
                 rate_fps=rate,
                 camera=self._source.status(),
                 changes=dict(self._changes),
+                l0=l0_stats,
+                detector=self._detector_state,
             )
+
+    def _start_detector(self) -> None:
+        """Loads the detector once, as the model loads, and starts its loop. A detector that does
+        not load is reported, and L1 comes from the classifier alone."""
+        model = self._settings.detector_model
+        if self._detector is None and model is not None:
+            try:
+                self._detector = detector_model.load(
+                    model, self._settings.detector_engine, self._settings.detector_device
+                )
+            except detector_model.DetectorUnavailable as error:
+                _log.error("no L0: %s", error)
+                self._detector_state = DetectorState("failed", str(error))
+                return
+        if self._detector is None:
+            return
+        self._detector_state = DetectorState("ok")
+        if self._l0_loop is None:
+            self._l0_loop = L0Loop(
+                self._detector, self._source, self._l0_view, self._settings.detect_every
+            )
+        self._l0_loop.start()
+
+    def _l0_view(self) -> tuple[float | None, tuple[int, int]]:
+        with self._lock:
+            return self._geometry.dpt, self._geometry.size
+
+    def _fresh_l0(self) -> L0 | None:
+        if self._l0_loop is None:
+            return None
+        l0 = self._l0_loop.newest()[0]
+        return l0 if l0 is not None and is_fresh(l0, self._settings.l0_limit) else None
+
+    def _combined(self, scored: _Scored, l0: L0 | None) -> Mapping[str, L1Entry]:
+        """The classifier's L1 of ``scored`` with what ``l0`` says, under that result's manifest."""
+        geometry = scored.geometry
+        if l0 is None or geometry.dpt is None:
+            says: Mapping[str, DetectorSays] = {}
+        else:
+            says = detector_says(
+                l0.detections,
+                geometry.positions,
+                geometry.size,
+                car_width(geometry.dpt),
+                self._settings.margin_g * geometry.dpt,
+            )
+        return {id: combine(entry, says.get(id)) for id, entry in scored.l1.items()}
 
     def _load_scorer(self) -> Scorer | None:
         try:
@@ -529,8 +641,9 @@ class L1Loop:
         else:
             live_reason = None
         geometry = scored.geometry if scored is not None else self._geometry
+        l0 = self._fresh_l0()
         if live_reason is None and scored is not None:
-            l1 = scored.l1
+            l1 = self._combined(scored, None if scored.wrong_frame_size else l0)
         else:
             l1 = {
                 id: L1Entry("unknown", reason=geometry.unknown.get(id, live_reason))
@@ -540,7 +653,7 @@ class L1Loop:
         if drift is not None and drift.past:
             l1 = {id: L1Entry("unknown", reason=_DRIFT) for id in geometry.sensor_ids}
         if scored is None:
-            return L1Result(None, l1, {}, threshold, {}, geometry.archive_id, drift=drift)
+            return L1Result(None, l1, {}, threshold, {}, geometry.archive_id, drift=drift, l0=l0)
         return L1Result(
             scored.frame,
             l1,
@@ -550,4 +663,5 @@ class L1Loop:
             geometry.archive_id,
             scored.wrong_frame_size,
             drift,
+            l0,
         )
