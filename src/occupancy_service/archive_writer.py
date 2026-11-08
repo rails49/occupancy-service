@@ -45,7 +45,9 @@ class ArchiveWriter:
 
     One lock covers each look at the current manifest and the rename that depends on it, so that of
     two saves from one copy only the first succeeds. A body is taken before the lock, so a slow
-    client holds up no other. Any ``OSError`` or ``R49Error`` raised leaves the old file in place.
+    client holds up no other. An ``OSError`` or ``R49Error`` raised before a rename leaves the old
+    file in place. One raised by ``reload`` comes after the rename: the new manifest stays on disk,
+    and the save still answers 500.
     """
 
     def __init__(self, archive: str | os.PathLike[str], reload: Callable[[], None]) -> None:
