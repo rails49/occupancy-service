@@ -239,6 +239,11 @@ def test_an_unknown_profile_refuses_the_process_with_no_port_left_bound(
         probe.bind(("127.0.0.1", port))
 
 
+def test_a_refusal_comes_before_anything_the_model_writes(tmp_path: Path, archive: Path) -> None:
+    line = assert_refused(tmp_path, archive, "--device", "NPU", "--profile", "nonsense")
+    assert "nonsense" in line
+
+
 def test_an_address_in_use_refuses_the_process(tmp_path: Path, archive: Path) -> None:
     with socket.socket() as holder:
         holder.bind(("127.0.0.1", 0))
