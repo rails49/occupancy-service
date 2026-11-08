@@ -15,6 +15,7 @@ from paho.mqtt.enums import CallbackAPIVersion, MQTTErrorCode
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
 
+from occupancy_service.l0 import L0, l0_json
 from occupancy_service.l1 import L1Change, L1Entry, L1Result, L1Subscription
 from occupancy_service.profile import Message, Profile, ProfileError, encode, load_profile
 
@@ -205,6 +206,8 @@ class Publisher:
             raise ProfileError(f"two active profiles are named {name}")
         self._shared_profiles = [p for p in self._profiles if p.connection == "shared"]
         self._per_sensor_profiles = [p for p in self._profiles if p.connection == "per_sensor"]
+        self._l0_profiles = [p for p in self._shared_profiles if p.l0_topic is not None]
+        self._l0_seen: L0 | None = None  # The newest L0 this has sent, or passed over.
         self._holds = {
             profile.name: _ClearHold(profile.clear_hold_s)
             for profile in self._profiles
@@ -266,6 +269,7 @@ class Publisher:
         result = self._source.latest()
         self._open_and_close(result)
         self._send_on_fresh(result)
+        self._send_l0(result)
         next_due = min(due.values(), default=math.inf)
         change = subscription.get(max(min(_WAKE, next_due - time.monotonic()), 0))
         if change is not None:
@@ -327,6 +331,21 @@ class Publisher:
                 connection.fresh.clear()
                 profile = next(p for p in self._per_sensor_profiles if p.name == name)
                 self._report(profile, sensor, result.l1[sensor], result, fresh=True)
+
+    def _send_l0(self, result: L1Result) -> None:
+        """A new L0, once, on each profile with an ``l0_topic``, not retained. Nothing goes out
+        with no archive ``id``, or while the broker is gone."""
+        l0 = result.l0
+        if l0 is None or l0 is self._l0_seen:
+            return
+        self._l0_seen = l0
+        if self._shared is None or not self._shared.is_connected():
+            return
+        body = encode(l0_json(l0))
+        for profile in self._l0_profiles:
+            topic = profile.l0_topic_for(result.archive_id)
+            if topic is not None:
+                self._shared.client.publish(topic, body, profile.qos, retain=False)
 
     def _send_change(self, change: L1Change) -> None:
         result = self._source.latest()

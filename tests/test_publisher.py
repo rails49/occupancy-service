@@ -11,10 +11,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fake_l1 import FakeChecks, FakeScorer, FakeSource, picture, running, wait_for, write_archive
+from fake_l1 import (
+    FakeChecks,
+    FakeDetector,
+    FakeScorer,
+    FakeSource,
+    detection,
+    picture,
+    running,
+    wait_for,
+    write_archive,
+)
 from mqtt_broker import Broker, Received, Subscriber, mosquitto
 
 from occupancy_service.capture import Frame
+from occupancy_service.l0 import L0
 from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings, L1Subscription
 from occupancy_service.live_check import check
 from occupancy_service.profile import ProfileError
@@ -26,6 +37,7 @@ OCCUPIED = L1Entry("occupied", confidence=0.93)
 NO_FRAMES = L1Entry("unknown", reason="no frames")
 OWN = "occupancy/archive-1/sensor/"
 CONTROL = "tc49/layout/sensor"
+OWN_L0 = "occupancy/archive-1/l0"
 
 
 class FakeResults:
@@ -35,10 +47,11 @@ class FakeResults:
         self.l1 = dict(l1)
         self.archive_id = archive_id
         self.frame: Frame | None = None
+        self.l0: L0 | None = None
         self.subscriptions: list[L1Subscription] = []
 
     def latest(self) -> L1Result:
-        return L1Result(self.frame, dict(self.l1), {}, None, {}, self.archive_id)
+        return L1Result(self.frame, dict(self.l1), {}, None, {}, self.archive_id, l0=self.l0)
 
     def subscribe(self) -> L1Subscription:
         subscription = L1Subscription(dict(self.l1), lambda: None)
@@ -1148,3 +1161,84 @@ def test_no_python_file_under_src_names_rocrail() -> None:
     named = [path for path in src.rglob("*.py") if "rocrail" in path.read_text().lower()]
     assert named == []
     assert len(list(src.rglob("*.py"))) > 3
+
+
+def an_l0(*detections: Any) -> L0:
+    return L0(Frame(b"", 7, datetime(2026, 11, 5, 10, 15, 29, tzinfo=UTC)), detections)
+
+
+def test_the_own_vocabulary_profile_sends_each_l0_once_not_retained(broker: Broker) -> None:
+    source = FakeResults({"a": CLEAR})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker)):
+        wait_for(lambda: subscriber.on(OWN + "a"))
+        source.l0 = an_l0(detection(160, 120, confidence=0.7))
+        wait_for(lambda: subscriber.on(OWN_L0))
+        time.sleep(0.3)
+        assert len(subscriber.on(OWN_L0)) == 1
+        source.l0 = an_l0()
+        wait_for(lambda: len(subscriber.on(OWN_L0)) == 2)
+        with subscribed(broker) as late:
+            time.sleep(0.3)
+            assert late.on(OWN_L0) == []
+
+    first, second = subscriber.on(OWN_L0)
+    assert payload(first) == {
+        "captured_at": "2026-11-05T10:15:29+00:00",
+        "detections": [
+            {
+                "centre": {"x": 160, "y": 120},
+                "length": 50,
+                "width": 30,
+                "angle": 0,
+                "class": "passenger",
+                "confidence": 0.7,
+            }
+        ],
+    }
+    assert not first.retain
+    assert payload(second)["detections"] == []
+
+
+def test_the_control_profile_sends_no_l0(broker: Broker) -> None:
+    source = FakeResults({"a": CLEAR})
+    source.l0 = an_l0(detection(160, 120))
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "control")):
+        wait_for(lambda: len(subscriber.on(CONTROL)) >= 2)
+    assert {message.topic for message in subscriber.messages} == {CONTROL}
+
+
+def test_no_l0_goes_out_with_no_archive_id(broker: Broker) -> None:
+    source = FakeResults({"a": L1Entry("unknown", reason="archive has no id")}, archive_id=None)
+    source.l0 = an_l0(detection(160, 120))
+    settings = settings_for(broker, "occupancy", "control")
+    with subscribed(broker) as subscriber, publishing(source, settings):
+        wait_for(lambda: len(subscriber.on(CONTROL)) >= 2)
+        source.l0 = an_l0()
+        time.sleep(0.3)
+    assert {message.topic for message in subscriber.messages} == {CONTROL}
+
+
+def test_one_l0_message_per_detector_run_on_the_real_loop(broker: Broker, tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "a", {"a": (160, 120)})
+    source = FakeSource()
+    source.show()
+    detector = FakeDetector([detection(160, 120)])
+    settings = L1Settings(archive, detect_every=0.3)
+    loop = L1Loop(settings, source, FakeScorer({"a": 0.1}), detector=detector)
+    with (
+        subscribed(broker) as subscriber,
+        running(loop),
+        publishing(loop, settings_for(broker, "occupancy", "control")),
+    ):
+
+        def runs() -> int:
+            source.show()  # The detector runs only on a frame it has not seen.
+            time.sleep(0.05)
+            return detector.runs
+
+        wait_for(lambda: runs() >= 4)
+        time.sleep(0.2)
+        sent = len(subscriber.on(OWN_L0))
+        ran = detector.runs
+    assert ran - 1 <= sent <= ran  # A run before the broker connected sends nothing.
+    assert {"state": "occupied", "confidence": 0.8} in map(payload, subscriber.on(OWN + "a"))

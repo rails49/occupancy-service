@@ -13,11 +13,12 @@ from occupancy_service.l1 import L1Entry
 
 _SHIPPED = Path(__file__).parent / "profiles"
 _KEYS = {"topic", "payload", "retain", "qos", "repeat"}
-_OPTIONAL_KEYS = {"clear_hold_s", "connection", "will_state"}
+_OPTIONAL_KEYS = {"clear_hold_s", "connection", "will_state", "l0_topic"}
 _CONNECTIONS = ("shared", "per_sensor")
 _STATES = ("occupied", "clear", "unknown")
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _TOPIC_PLACEHOLDERS = {"archive_id", "sensor"}
+_L0_TOPIC_PLACEHOLDERS = {"archive_id"}
 _PAYLOAD_PLACEHOLDERS = {
     "occupied": {"sensor", "confidence"},
     "clear": {"sensor"},
@@ -51,7 +52,8 @@ def encode(message: Message) -> bytes:
 class Profile:
     """One loaded profile, named after its file. ``repeat`` and ``clear_hold_s`` are in seconds. A
     ``repeat`` of 0 means no repeat, and a ``clear_hold_s`` of 0 means no hold. ``connection`` is
-    ``shared`` or ``per_sensor``, and only ``per_sensor`` may name a ``will_state``."""
+    ``shared`` or ``per_sensor``, and only ``per_sensor`` may name a ``will_state``. Only a
+    ``shared`` profile may have an ``l0_topic``, and None means it publishes no L0."""
 
     name: str
     topic: str
@@ -62,6 +64,7 @@ class Profile:
     clear_hold_s: float = 0
     connection: str = "shared"
     will_state: State | None = None
+    l0_topic: str | None = None
 
     @property
     def needs_archive_id(self) -> bool:
@@ -74,12 +77,14 @@ class Profile:
         for name in _placeholders(self.topic):
             if _NOT_IN_A_LEVEL.search(values[name]):
                 return None
-        topic = _fill(self.topic, values)
-        try:
-            too_long = len(topic.encode()) > _TOPIC_BYTES
-        except UnicodeEncodeError:
+        return _publishable(_fill(self.topic, values))
+
+    def l0_topic_for(self, archive_id: str | None) -> str | None:
+        """The topic of L0. None with no ``l0_topic``, with no archive ``id``, or when the topic
+        cannot carry the archive's ``id``."""
+        if self.l0_topic is None or archive_id is None or _NOT_IN_A_LEVEL.search(archive_id):
             return None
-        return None if too_long or topic.startswith("$") else topic
+        return _publishable(_fill(self.l0_topic, {"archive_id": archive_id}))
 
     def message_for(self, sensor: str, entry: L1Entry) -> Message:
         values: dict[str, Any] = {"sensor": sensor}
@@ -96,6 +101,15 @@ class Profile:
         if self.will_state is None:
             return None
         return self.message_for(sensor, L1Entry(self.will_state, reason=_WILL))
+
+
+def _publishable(topic: str) -> str | None:
+    """``topic``, or None when MQTT does not allow it."""
+    try:
+        too_long = len(topic.encode()) > _TOPIC_BYTES
+    except UnicodeEncodeError:
+        return None
+    return None if too_long or topic.startswith("$") else topic
 
 
 def load_profile(name: str) -> Profile:
@@ -136,6 +150,7 @@ def _parse(name: str, table: dict[str, Any]) -> Profile:
         clear_hold_s=_parse_clear_hold(table.get("clear_hold_s", 0)),
         connection=connection,
         will_state=_parse_will_state(table.get("will_state"), connection, payload),
+        l0_topic=_parse_l0_topic(table.get("l0_topic"), connection),
     )
 
 
@@ -157,13 +172,21 @@ def _parse_will_state(state: Any, connection: str, payload: Mapping[str, Message
     return state
 
 
-def _parse_topic(topic: Any) -> str:
+def _parse_l0_topic(topic: Any, connection: str) -> str | None:
+    if topic is None:
+        return None
+    if connection != "shared":
+        raise ValueError('l0_topic needs connection = "shared"')
+    return _parse_topic(topic, "l0_topic", _L0_TOPIC_PLACEHOLDERS)
+
+
+def _parse_topic(topic: Any, key: str = "topic", allowed: set[str] = _TOPIC_PLACEHOLDERS) -> str:
     if not isinstance(topic, str) or not topic:
-        raise ValueError("topic must be a non-empty string")
+        raise ValueError(f"{key} must be a non-empty string")
     if _NOT_IN_A_TOPIC.search(topic):
-        raise ValueError(f"topic {topic!r} holds a character no topic may publish to")
-    for name in _placeholders(topic) - _TOPIC_PLACEHOLDERS:
-        raise ValueError(f"topic cannot hold {{{name}}}")
+        raise ValueError(f"{key} {topic!r} holds a character no topic may publish to")
+    for name in _placeholders(topic) - allowed:
+        raise ValueError(f"{key} cannot hold {{{name}}}")
     return topic
 
 

@@ -42,11 +42,10 @@ class Detection:
 
 @dataclass(frozen=True)
 class L0:
-    """The detections in one frame. ``run`` counts the detector's runs, from 1."""
+    """The detections in one frame: one run of the detector."""
 
     frame: Frame
     detections: tuple[Detection, ...]
-    run: int
 
 
 @dataclass(frozen=True)
@@ -141,8 +140,7 @@ class L0Loop:
             return
         detect_ms = (time.perf_counter() - start) * 1000
         with self._lock:
-            run = 1 if self._l0 is None else self._l0.run + 1
-            self._l0 = L0(frame, detections, run)
+            self._l0 = L0(frame, detections)
             self._detect_ms = detect_ms
             now = time.monotonic()
             self._runs_at.append(now)
@@ -201,6 +199,14 @@ def _inside(detection: Detection, x: float, y: float, width: float, margin: floa
     along = dx * cos + dy * sin
     across = -dx * sin + dy * cos
     return abs(along) < detection.length / 2 + margin and abs(across) < width / 2
+
+
+def l0_json(l0: L0) -> dict[str, Any]:
+    """L0 as LIVE.md has it, but for ``frame_id``, which only ``latest`` can give."""
+    return {
+        "captured_at": l0.frame.arrived_at.isoformat(),
+        "detections": [detection_json(detection) for detection in l0.detections],
+    }
 
 
 def detection_json(detection: Detection) -> dict[str, Any]:
