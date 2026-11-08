@@ -135,9 +135,12 @@ A profile is a TOML file. The `profiles` setting names each by a shipped profile
 | `repeat` | Seconds between sending every sensor, from 0. 0 means no repeat: every sensor still goes out on each connect, and anything else only if its payload differs from the last one sent for that sensor. |
 | `clear_hold_s` | Optional. Seconds to [hold](#holding-clear) a `clear`, from 0. Absent or 0 means no hold. |
 | `connection` | Optional. `shared`, the default, or `per_sensor` for [one connection per sensor](#one-connection-per-sensor). |
+| `l0_topic` | Optional, and only with `shared`. The topic of [L0](#l0), which may hold `{archive_id}`. Absent means no L0. |
 | `will_state` | Optional, and only with `per_sensor`. `occupied`, `clear` or `unknown`: the state whose payload is each sensor's last will, on that sensor's topic, with the profile's `retain` and `qos`. A `{reason}` in it is `connection lost`, and it cannot hold `{confidence}`. Absent means no will. |
 
 In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
+
+A profile with an `l0_topic` publishes one message per detector run there, never retained, at the profile's `qos`, and nothing while the archive has no `id`. The message is the [`l0` object of `latest`](LIVE.md#l0) without its `frame_id`, which only `latest` can give. L0 does not repeat, and does not go out on a connect.
 
 A topic that holds `{archive_id}` publishes nothing while the archive has no `id`. A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
 
@@ -168,13 +171,14 @@ The hold makes `clear` later, so control releases a block or transit up to that 
 
 ### The shipped profiles
 
-`occupancy`, this service's own vocabulary. Each message is an [L1 entry](LIVE.md#l1-entry):
+`occupancy`, this service's own vocabulary. Each message is an [L1 entry](LIVE.md#l1-entry). With the detector installed, it also publishes L0 on `occupancy/<archive id>/l0`:
 
 ```toml
 topic = "occupancy/{archive_id}/sensor/{sensor}"
 retain = false
 qos = 0
 repeat = 1
+l0_topic = "occupancy/{archive_id}/l0"
 
 [payload.occupied]
 state = "occupied"

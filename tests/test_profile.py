@@ -55,6 +55,41 @@ def test_the_control_profile_says_what_the_contract_asks() -> None:
     }
 
 
+def test_only_the_own_vocabulary_profile_has_an_l0_topic() -> None:
+    assert load_profile("occupancy").l0_topic_for("archive-1") == "occupancy/archive-1/l0"
+    for name in ("control", "jmri", "rocrail"):
+        assert load_profile(name).l0_topic is None
+        assert load_profile(name).l0_topic_for("archive-1") is None
+
+
+def test_an_l0_topic_has_no_topic_with_no_archive_id_or_one_it_cannot_carry(
+    tmp_path: Path,
+) -> None:
+    profile = load_profile("occupancy")
+    assert profile.l0_topic_for(None) is None
+    assert profile.l0_topic_for("a/b") is None
+    assert profile.l0_topic_for("a+") is None
+    fixed = load_profile(str(write(tmp_path, 'l0_topic = "detections"\n' + VALID)))
+    assert fixed.l0_topic_for("archive-1") == "detections"
+    assert fixed.l0_topic_for(None) is None
+
+
+@pytest.mark.parametrize(
+    ("line", "complaint"),
+    [
+        ('l0_topic = ""', "l0_topic"),
+        ("l0_topic = 1", "l0_topic"),
+        ('l0_topic = "l0/{sensor}"', "sensor"),
+        ('l0_topic = "l0/#"', "l0_topic"),
+        ('connection = "per_sensor"\nl0_topic = "l0"', "l0_topic"),
+    ],
+)
+def test_refuses_an_l0_topic_it_cannot_use(tmp_path: Path, line: str, complaint: str) -> None:
+    path = write(tmp_path, VALID.replace("[payload]", f"{line}\n[payload]"))
+    with pytest.raises(ProfileError, match=complaint):
+        load_profile(str(path))
+
+
 def test_the_control_profile_repeats_within_the_second_its_contract_allows() -> None:
     assert load_profile("control").repeat < 1
 

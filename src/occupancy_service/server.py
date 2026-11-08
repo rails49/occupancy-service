@@ -26,7 +26,7 @@ from occupancy_service.archive_writer import MANIFEST as _MANIFEST
 from occupancy_service.archive_writer import ArchiveWriter, Refused, can_name, etag_of
 from occupancy_service.capture import CaptureStatus, Frame
 from occupancy_service.drift import DriftReading, DriftUnmeasured
-from occupancy_service.l0 import L0, detection_json
+from occupancy_service.l0 import L0, l0_json
 from occupancy_service.l1 import DetectorState, L1Entry, L1Loop, L1Result, L1Stats
 from occupancy_service.origin import is_own_page
 from occupancy_service.publisher import LastMessage
@@ -376,11 +376,7 @@ def _fields(result: L1Result, stats: L1Stats, frame: Frame | None, run_id: str) 
 
 
 def _l0(l0: L0, run_id: str) -> dict[str, Any]:
-    return {
-        "frame_id": f"{run_id}-{l0.frame.id}",
-        "captured_at": l0.frame.arrived_at.isoformat(),
-        "detections": [detection_json(detection) for detection in l0.detections],
-    }
+    return {"frame_id": f"{run_id}-{l0.frame.id}", **l0_json(l0)}
 
 
 def _detector(detector: DetectorState) -> dict[str, Any]:

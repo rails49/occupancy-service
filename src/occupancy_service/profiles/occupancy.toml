@@ -3,6 +3,8 @@ topic = "occupancy/{archive_id}/sensor/{sensor}"
 retain = false
 qos = 0
 repeat = 1
+# L0, one message per detector run, when the detector is installed.
+l0_topic = "occupancy/{archive_id}/l0"
 
 [payload.occupied]
 state = "occupied"
