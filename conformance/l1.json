@@ -1,0 +1,350 @@
+{
+ "standard_width_mm": 3150.0,
+ "standard_gauge_mm": 1435.0,
+ "cases": [
+  {
+   "name": "no detections: every sensor in the frame is clear",
+   "width": 320,
+   "height": 240,
+   "dpt": 20,
+   "car_width": 43.90243902439025,
+   "margin_g": 2,
+   "detections": [],
+   "sensors": {
+    "a": {
+     "x": 100,
+     "y": 100
+    },
+    "b": {
+     "x": 200,
+     "y": 50
+    }
+   },
+   "expected": {
+    "a": {
+     "state": "clear"
+    },
+    "b": {
+     "state": "clear"
+    }
+   }
+  },
+  {
+   "name": "the box edge: strictly inside is occupied, on the edge is clear",
+   "width": 320,
+   "height": 240,
+   "dpt": 20,
+   "car_width": 43.90243902439025,
+   "margin_g": 2,
+   "detections": [
+    {
+     "centre": {
+      "x": 100,
+      "y": 100
+     },
+     "length": 100,
+     "width": 30,
+     "angle": 0,
+     "class": "passenger",
+     "confidence": 0.7
+    }
+   ],
+   "sensors": {
+    "end_in": {
+     "x": 189.9,
+     "y": 100
+    },
+    "end_on": {
+     "x": 190,
+     "y": 100
+    },
+    "side_in": {
+     "x": 100,
+     "y": 121.9
+    },
+    "side_out": {
+     "x": 100,
+     "y": 122
+    }
+   },
+   "expected": {
+    "end_in": {
+     "state": "occupied",
+     "confidence": 0.7
+    },
+    "end_on": {
+     "state": "clear"
+    },
+    "side_in": {
+     "state": "occupied",
+     "confidence": 0.7
+    },
+    "side_out": {
+     "state": "clear"
+    }
+   }
+  },
+  {
+   "name": "the car width replaces the predicted width",
+   "width": 320,
+   "height": 240,
+   "dpt": 20,
+   "car_width": 43.90243902439025,
+   "margin_g": 2,
+   "detections": [
+    {
+     "centre": {
+      "x": 80,
+      "y": 60
+     },
+     "length": 60,
+     "width": 200,
+     "angle": 0,
+     "class": "passenger",
+     "confidence": 0.6
+    },
+    {
+     "centre": {
+      "x": 240,
+      "y": 180
+     },
+     "length": 60,
+     "width": 5,
+     "angle": 0,
+     "class": "passenger",
+     "confidence": 0.65
+    }
+   ],
+   "sensors": {
+    "wide": {
+     "x": 80,
+     "y": 90
+    },
+    "narrow": {
+     "x": 240,
+     "y": 195
+    }
+   },
+   "expected": {
+    "wide": {
+     "state": "clear"
+    },
+    "narrow": {
+     "state": "occupied",
+     "confidence": 0.65
+    }
+   }
+  },
+  {
+   "name": "where boxes overlap, the highest confidence wins",
+   "width": 320,
+   "height": 240,
+   "dpt": 20,
+   "car_width": 43.90243902439025,
+   "margin_g": 2,
+   "detections": [
+    {
+     "centre": {
+      "x": 150,
+      "y": 120
+     },
+     "length": 80,
+     "width": 40,
+     "angle": 0,
+     "class": "passenger",
+     "confidence": 0.6
+    },
+    {
+     "centre": {
+      "x": 160,
+      "y": 120
+     },
+     "length": 80,
+     "width": 40,
+     "angle": 0,
+     "class": "passenger",
+     "confidence": 0.8
+    },
+    {
+     "centre": {
+      "x": 170,
+      "y": 120
+     },
+     "length": 80,
+     "width": 40,
+     "angle": 0,
+     "class": "passenger",
+     "confidence": 0.7
+    }
+   ],
+   "sensors": {
+    "s": {
+     "x": 160,
+     "y": 120
+    }
+   },
+   "expected": {
+    "s": {
+     "state": "occupied",
+     "confidence": 0.8
+    }
+   }
+  },
+  {
+   "name": "the margin lengthens the box at both ends",
+   "width": 320,
+   "height": 240,
+   "dpt": 20,
+   "car_width": 43.90243902439025,
+   "margin_g": 2,
+   "detections": [
+    {
+     "centre": {
+      "x": 160,
+      "y": 100
+     },
+     "length": 100,
+     "width": 40,
+     "angle": 0,
+     "class": "passenger",
+     "confidence": 0.9
+    }
+   ],
+   "sensors": {
+    "ahead": {
+     "x": 240,
+     "y": 100
+    },
+    "behind": {
+     "x": 80,
+     "y": 100
+    },
+    "past_ahead": {
+     "x": 255,
+     "y": 100
+    },
+    "past_behind": {
+     "x": 65,
+     "y": 100
+    }
+   },
+   "expected": {
+    "ahead": {
+     "state": "occupied",
+     "confidence": 0.9
+    },
+    "behind": {
+     "state": "occupied",
+     "confidence": 0.9
+    },
+    "past_ahead": {
+     "state": "clear"
+    },
+    "past_behind": {
+     "state": "clear"
+    }
+   }
+  },
+  {
+   "name": "the angle turns the box",
+   "width": 320,
+   "height": 240,
+   "dpt": 20,
+   "car_width": 43.90243902439025,
+   "margin_g": 2,
+   "detections": [
+    {
+     "centre": {
+      "x": 100,
+      "y": 120
+     },
+     "length": 60,
+     "width": 40,
+     "angle": 1.5707963267948966,
+     "class": "passenger",
+     "confidence": 0.75
+    }
+   ],
+   "sensors": {
+    "along_in": {
+     "x": 100,
+     "y": 185
+    },
+    "along_out": {
+     "x": 100,
+     "y": 195
+    },
+    "across_in": {
+     "x": 115,
+     "y": 120
+    },
+    "across_out": {
+     "x": 125,
+     "y": 120
+    }
+   },
+   "expected": {
+    "along_in": {
+     "state": "occupied",
+     "confidence": 0.75
+    },
+    "along_out": {
+     "state": "clear"
+    },
+    "across_in": {
+     "state": "occupied",
+     "confidence": 0.75
+    },
+    "across_out": {
+     "state": "clear"
+    }
+   }
+  },
+  {
+   "name": "a sensor outside the frame is unknown",
+   "width": 320,
+   "height": 240,
+   "dpt": 20,
+   "car_width": 43.90243902439025,
+   "margin_g": 2,
+   "detections": [
+    {
+     "centre": {
+      "x": 10,
+      "y": 100
+     },
+     "length": 100,
+     "width": 40,
+     "angle": 0,
+     "class": "passenger",
+     "confidence": 0.9
+    }
+   ],
+   "sensors": {
+    "left": {
+     "x": -50,
+     "y": 100
+    },
+    "right": {
+     "x": 400,
+     "y": 100
+    },
+    "inside": {
+     "x": 300,
+     "y": 200
+    }
+   },
+   "expected": {
+    "left": {
+     "state": "unknown"
+    },
+    "right": {
+     "state": "unknown"
+    },
+    "inside": {
+     "state": "clear"
+    }
+   }
+  }
+ ]
+}
