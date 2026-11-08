@@ -1,5 +1,6 @@
 """Capture MJPEG from a USB camera through an ``ffmpeg`` child process, keeping the latest frame."""
 
+import io
 import logging
 import os
 import select
@@ -11,7 +12,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+import numpy as np
+import numpy.typing as npt
 import r49
+from PIL import Image
 
 _log = logging.getLogger(__name__)
 
@@ -21,6 +25,7 @@ _RATE_WINDOW = 2.0  # Seconds of arrivals the capture rate is measured over.
 _POLL = 0.05  # Seconds between looks at the pipe, the hang limit and stop().
 _READ_SIZE = 1 << 16
 _SOI, _EOI, _SOS = 0xD8, 0xD9, 0xDA
+_UNDECODABLE = (OSError, ValueError, SyntaxError, Image.DecompressionBombError)
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,16 @@ class Frame:
     jpeg: bytes
     id: int
     arrived_at: datetime
+
+
+def decode(jpeg: bytes) -> npt.NDArray[np.uint8] | None:
+    """The frame as height × width × RGB, 8 bits. None when it does not decode."""
+    try:
+        with Image.open(io.BytesIO(jpeg)) as image:
+            return np.asarray(image.convert("RGB"))
+    except _UNDECODABLE as error:
+        _log.warning("dropping a frame that does not decode: %s", error)
+        return None
 
 
 @dataclass(frozen=True)

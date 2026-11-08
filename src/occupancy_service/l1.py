@@ -1,6 +1,5 @@
 """Turn the newest frame into L1: read the manifest, decode, cut, score, apply the threshold."""
 
-import io
 import logging
 import os
 import threading
@@ -18,9 +17,8 @@ import numpy as np
 import numpy.typing as npt
 import r49
 from classifier.runtime import Engine
-from PIL import Image
 
-from occupancy_service.capture import CaptureStatus, Frame
+from occupancy_service.capture import CaptureStatus, Frame, decode
 from occupancy_service.drift import (
     Check,
     DriftCheck,
@@ -36,7 +34,6 @@ _POLL = 0.01  # Seconds between looks for a new frame.
 _WATCH_EVERY = 0.05  # Seconds between looks for a change that no new result brings.
 _RATE_WINDOW = 2.0  # Seconds of results the overall rate is measured over.
 _JOIN_WAIT = 2.0  # Seconds stop() waits for a thread, which may be stuck in a scorer.
-_UNDECODABLE = (OSError, ValueError, SyntaxError, Image.DecompressionBombError)
 
 _NO_FRAMES = "no frames"
 _SCORING_STALLED = "scoring stalled"
@@ -267,16 +264,6 @@ class _Scored:
     wrong_frame_size: bool = False
 
 
-def _decode(jpeg: bytes) -> npt.NDArray[np.uint8] | None:
-    """The frame as height × width × RGB, 8 bits. None when it does not decode."""
-    try:
-        with Image.open(io.BytesIO(jpeg)) as image:
-            return np.asarray(image.convert("RGB"))
-    except _UNDECODABLE as error:
-        _log.warning("dropping a frame that does not decode: %s", error)
-        return None
-
-
 def _entry(p_occupied: float | None, threshold: float) -> L1Entry:
     if p_occupied is None:
         return L1Entry("unknown", reason=_OUTSIDE_THE_FRAME)
@@ -464,7 +451,7 @@ class L1Loop:
         """The result of ``frame``. None when it is dropped."""
         capture_ms = max((datetime.now(UTC) - frame.arrived_at).total_seconds() * 1000, 0.0)
         start = time.perf_counter()
-        image = _decode(frame.jpeg)
+        image = decode(frame.jpeg)
         decode_ms = (time.perf_counter() - start) * 1000
         if image is None:
             return None
