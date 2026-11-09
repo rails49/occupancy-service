@@ -13,6 +13,9 @@ The rules in [LIVE.md](LIVE.md).
 **Profile**:
 A TOML file that says how L1 goes out over MQTT, and L0 where it has an L0 topic: its topic, its payloads, how often it repeats, how long it holds a `clear`, and whether each sensor has a connection and a last will of its own.
 
+**Active profile**:
+A profile the service publishes on, with what it has sent and what it is holding.
+
 ### Owned elsewhere
 
 **Archive**:
