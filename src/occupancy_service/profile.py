@@ -17,6 +17,9 @@ _OPTIONAL_KEYS = {"clear_hold_s", "connection", "will_state", "l0_topic"}
 _CONNECTIONS = ("shared", "per_sensor")
 _STATES = ("occupied", "clear", "unknown")
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
+# Braces around a name with spaces or hyphens, which a reader takes for a placeholder. Braces
+# around anything else, such as JSON text, are left alone.
+_LOOKALIKE = re.compile(r"\{[\w\s-]*\w[\w\s-]*\}")
 _TOPIC_PLACEHOLDERS = {"archive_id", "sensor"}
 _L0_TOPIC_PLACEHOLDERS = {"archive_id"}
 _PAYLOAD_PLACEHOLDERS = {
@@ -185,6 +188,11 @@ def _parse_topic(topic: Any, key: str = "topic", allowed: set[str] = _TOPIC_PLAC
         raise ValueError(f"{key} must be a non-empty string")
     if _NOT_IN_A_TOPIC.search(topic):
         raise ValueError(f"{key} {topic!r} holds a character no topic may publish to")
+    if topic.startswith("$"):
+        raise ValueError(f"{key} cannot start with $, which a broker keeps for its own topics")
+    if len(_PLACEHOLDER.sub("", topic).encode()) > _TOPIC_BYTES:
+        raise ValueError(f"{key} is over the {_TOPIC_BYTES} bytes a topic may hold")
+    _refuse_lookalikes(key, topic)
     for name in _placeholders(topic) - allowed:
         raise ValueError(f"{key} cannot hold {{{name}}}")
     return topic
@@ -201,6 +209,7 @@ def _parse_payload(payload: Any) -> dict[str, Message]:
         message = payload[state]
         if not isinstance(message, str | dict):
             raise ValueError(f"payload {state} must be a string or a table")
+        _refuse_lookalikes(f"payload {state}", message)
         for name in _placeholders(message) - _PAYLOAD_PLACEHOLDERS[state]:
             raise ValueError(f"payload {state} cannot hold {{{name}}}")
         if not _is_json(message):
@@ -238,6 +247,24 @@ def _is_json(message: Message) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _refuse_lookalikes(key: str, value: Any) -> None:
+    """Refuse braces that look like a placeholder but are not one, anywhere in a string, a table
+    or a list, and a placeholder in a table's key, which is never filled."""
+    if isinstance(value, str):
+        for match in _LOOKALIKE.finditer(value):
+            if not _PLACEHOLDER.fullmatch(match[0]):
+                raise ValueError(f"{key} holds {match[0]}, which is not a placeholder")
+    elif isinstance(value, dict):
+        for name, item in value.items():
+            _refuse_lookalikes(f"{key} key {name!r}", name)
+            if _PLACEHOLDER.search(name):
+                raise ValueError(f"{key} key {name!r} holds a placeholder, which is not filled")
+            _refuse_lookalikes(key, item)
+    elif isinstance(value, list):
+        for item in value:
+            _refuse_lookalikes(key, item)
 
 
 def _placeholders(value: Any) -> set[str]:

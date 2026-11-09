@@ -81,6 +81,9 @@ def test_an_l0_topic_has_no_topic_with_no_archive_id_or_one_it_cannot_carry(
         ("l0_topic = 1", "l0_topic"),
         ('l0_topic = "l0/{sensor}"', "sensor"),
         ('l0_topic = "l0/#"', "l0_topic"),
+        ('l0_topic = "$SYS/l0"', "l0_topic.*\\$"),
+        (f'l0_topic = "{"x" * 65536}"', "l0_topic.*65535"),
+        ('l0_topic = "l0/{archive-id}"', "l0_topic.*archive-id"),
         ('connection = "per_sensor"\nl0_topic = "l0"', "l0_topic"),
     ],
 )
@@ -154,6 +157,16 @@ nested = { list = ["{sensor}", 1] }
         "nested": {"list": ["s1", 1]},
     }
     assert profile.message_for("s1", UNKNOWN) == "s1: no frames"
+
+
+def test_a_payload_may_hold_json_text_and_a_topic_may_fill_up_to_its_limit(
+    tmp_path: Path,
+) -> None:
+    text = VALID.replace("t/{sensor}", "x" * 65535 + "{archive_id}{sensor}")
+    text = text.replace('"ON"', '\'{"state": "on", "for": "{sensor}"}\'')
+    profile = load_profile(str(write(tmp_path, text)))
+    assert profile.message_for("s1", OCCUPIED) == '{"state": "on", "for": "s1"}'
+    assert profile.topic_for("s1", None) is None
 
 
 @pytest.mark.parametrize(
@@ -244,6 +257,15 @@ def test_a_sensor_id_with_a_lone_surrogate_still_goes_out_as_text(tmp_path: Path
         (lambda text: text.replace('"ON"', "{ when = 1979-05-27 }"), "occupied"),
         (lambda text: text.replace('"ON"', "{ number = nan }"), "occupied"),
         (lambda text: "not toml", "toml"),
+        (lambda text: text.replace("t/{sensor}", "$SYS/{sensor}"), "topic.*\\$"),
+        (lambda text: text.replace("t/{sensor}", "x" * 65536 + "/{sensor}"), "topic.*65535"),
+        (lambda text: text.replace("t/{sensor}", "t/{archive-id}"), "topic.*archive-id"),
+        (lambda text: text.replace("t/{sensor}", "t/{ sensor }"), "topic.*{ sensor }"),
+        (lambda text: text.replace('"OFF"', '"{ sensor } is clear"'), "clear.*{ sensor }"),
+        (lambda text: text.replace('"ON"', '{ a = ["{archive-id}"] }'), "occupied.*archive-id"),
+        (lambda text: text.replace('"ON"', '{ "{sensor}" = 1 }'), "occupied.*key.*{sensor}"),
+        (lambda text: text.replace('"ON"', '{ "{ sensor }" = 1 }'), "occupied.*{ sensor }"),
+        (lambda text: text.replace('"ON"', '{ a = { "{sensor}" = 1 } }'), "occupied.*{sensor}"),
     ],
 )
 def test_refuses_a_bad_profile_and_says_why(tmp_path: Path, change: Any, complaint: str) -> None:
