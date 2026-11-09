@@ -1197,3 +1197,16 @@ def test_no_l0_goes_out_with_no_archive_id() -> None:
         source.l0 = an_l0()
         time.sleep(0.3)
     assert {message.topic for message in shared.published} == {CONTROL}
+
+
+def test_a_new_confidence_alone_sends_nothing(tmp_path: Path) -> None:
+    """With no repeat, only an L1 change sends: ``FakeResults`` keeps ``L1Loop``'s rule."""
+    source = FakeResults({"a": OCCUPIED})
+    with faked(source, profile_file(tmp_path, repeat=0)) as (_, connect):
+        shared = shared_connected(connect)
+        wait_for(lambda: shared.on("own/a"))
+        source.show({"a": L1Entry("occupied", confidence=0.8)})
+        time.sleep(0.3)
+        assert [sent(message) for message in shared.on("own/a")] == [
+            {"state": "occupied", "confidence": 0.93}
+        ]
