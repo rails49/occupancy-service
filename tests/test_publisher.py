@@ -4,6 +4,7 @@ real L1 loop; and what it decides, on the test connection."""
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -29,7 +30,7 @@ from mqtt_broker import Broker, Received, Subscriber, mosquitto
 from occupancy_service.capture import Frame
 from occupancy_service.l0 import L0
 from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Settings
-from occupancy_service.l1_changes import L1Change, L1Subscription
+from occupancy_service.l1_changes import L1Changes, L1Subscription
 from occupancy_service.live_check import check
 from occupancy_service.profile import ProfileError
 from occupancy_service.publisher import Publisher, PublisherSettings, paho_connect
@@ -44,31 +45,34 @@ OWN_L0 = "occupancy/archive-1/l0"
 
 
 class FakeResults:
-    """A result source a test drives by hand."""
+    """A result source a test drives by hand. Its L1 changes are ``L1Loop``'s, from the same
+    ``L1Changes``, with a new manifest at each new archive ``id``."""
 
     def __init__(self, l1: Mapping[str, L1Entry], archive_id: str | None = "archive-1") -> None:
         self.l1 = dict(l1)
         self.archive_id = archive_id
         self.frame: Frame | None = None
         self.l0: L0 | None = None
-        self.subscriptions: list[L1Subscription] = []
+        self._lock = threading.Lock()  # Taken before the L1Changes lock, as L1Loop does.
+        self._changes = L1Changes()
+        self._manifest = object()
+        self._changes.update(self.l1, self._manifest)
 
     def latest(self) -> L1Result:
-        return L1Result(self.frame, dict(self.l1), {}, None, {}, self.archive_id, l0=self.l0)
+        with self._lock:
+            return L1Result(self.frame, dict(self.l1), {}, None, {}, self.archive_id, l0=self.l0)
 
     def subscribe(self) -> L1Subscription:
-        subscription = L1Subscription(dict(self.l1), lambda: None)
-        self.subscriptions.append(subscription)
-        return subscription
+        with self._lock:
+            return self._changes.subscribe()
 
     def show(self, l1: Mapping[str, L1Entry], archive_id: str | None = "archive-1") -> None:
-        """Change the result, telling subscribers as ``L1Loop`` does."""
-        before = self.l1
-        self.l1, self.archive_id = dict(l1), archive_id
-        for id, entry in l1.items():
-            if before.get(id) != entry:
-                for subscription in self.subscriptions:
-                    subscription.queue.put(L1Change(id, entry))
+        """Change the result, telling subscribers what ``L1Loop`` would."""
+        with self._lock:
+            if archive_id != self.archive_id:
+                self._manifest = object()
+            self.l1, self.archive_id = dict(l1), archive_id
+            self._changes.update(self.l1, self._manifest)
 
 
 @pytest.fixture

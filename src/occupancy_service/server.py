@@ -211,7 +211,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(_event(id, entry))
             comment_at = time.monotonic() + settings.comment_every
             while not self.live.stopping.is_set():
-                if subscription.outdated or subscription.queue.qsize() > settings.max_backlog:
+                if subscription.outdated or subscription.backlog() > settings.max_backlog:
                     return
                 wait = min(_EVENTS_WAKE, max(comment_at - time.monotonic(), 0))
                 change = subscription.get(wait)
