@@ -1,0 +1,10 @@
+**/__pycache__
+.claude
+.git
+.github
+.pytest_cache
+.ruff_cache
+.venv
+conformance
+docs
+tests

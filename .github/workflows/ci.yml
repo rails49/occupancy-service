@@ -30,3 +30,26 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install --yes ffmpeg mosquitto
 
       - run: bin/test.sh
+
+  # Both images as compose.yaml builds them, the service's without the detector.
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.12.6"
+          enable-cache: true
+
+      - run: |
+          docker build -f deploy/service.Dockerfile -t occupancy-service:ci .
+          commit=$(docker compose -f compose.yaml config --format json --no-interpolate \
+            | jq -r .services.page.build.args.OCCUPANCY_COMMIT)
+          docker build -f deploy/page.Dockerfile --build-arg "OCCUPANCY_COMMIT=$commit" \
+            -t occupancy-page:ci .
+
+      - run: uv run pytest -q tests/test_images.py
+        env:
+          OCCUPANCY_SERVICE_IMAGE: occupancy-service:ci
+          OCCUPANCY_PAGE_IMAGE: occupancy-page:ci
