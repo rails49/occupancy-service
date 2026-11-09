@@ -114,11 +114,9 @@ class _Connection:
         label: str,
         will: tuple[str, bytes, int, bool] | None = None,
         archive_id: str | None = None,
-        sensor: str = "",
     ) -> None:
         self.label = label
         self.archive_id = archive_id
-        self.sensor = sensor
         self.fresh = threading.Event()
         self._settings = settings
         self._closing = False
@@ -199,6 +197,24 @@ class _Connection:
             _log.warning("lost the broker on %s: %s", self.label, reason_code)
 
 
+class _SensorConnection(_Connection):
+    """The connection that carries one sensor on one ``per_sensor`` profile."""
+
+    def __init__(
+        self,
+        settings: PublisherSettings,
+        client_id: str,
+        will: tuple[str, bytes, int, bool] | None,
+        archive_id: str | None,
+        profile: Profile,
+        sensor: str,
+    ) -> None:
+        label = f"for sensor {sensor!r} on profile {profile.name}"
+        super().__init__(settings, client_id, label, will, archive_id)
+        self.profile = profile
+        self.sensor = sensor
+
+
 class Publisher:
     """One connection for the profiles with a ``shared`` connection, and one for each sensor on
     each ``per_sensor`` profile. paho's threads keep them up and reconnect, and this class's own
@@ -234,7 +250,8 @@ class Publisher:
         self._sent: dict[tuple[str, str], tuple[str, bytes]] = {}
         self._stopping = threading.Event()
         self._shared: _Connection | None = None
-        self._per_sensor: dict[tuple[str, str], _Connection] = {}  # By profile name and sensor.
+        # By profile name and sensor.
+        self._per_sensor: dict[tuple[str, str], _SensorConnection] = {}
         self._closed: list[_Connection] = []  # Disconnected, and not yet joined.
         self._thread: threading.Thread | None = None
 
@@ -326,10 +343,10 @@ class Publisher:
                     wanted[(profile.name, sensor)] = profile
         for key, connection in list(self._per_sensor.items()):
             if key not in wanted or connection.archive_id != result.archive_id:
-                profile = next(p for p in self._per_sensor_profiles if p.name == key[0])
-                topic = profile.topic_for(key[1], connection.archive_id)
-                if key not in wanted or profile.topic_for(key[1], result.archive_id) != topic:
-                    self._publish(connection, profile, key[1], _REMOVED, connection.archive_id)
+                profile, sensor = connection.profile, connection.sensor
+                topic = profile.topic_for(sensor, connection.archive_id)
+                if key not in wanted or profile.topic_for(sensor, result.archive_id) != topic:
+                    self._publish(connection, profile, sensor, _REMOVED, connection.archive_id)
                 connection.disconnect()
                 self._closed.append(connection)
                 del self._per_sensor[key]
@@ -340,16 +357,15 @@ class Publisher:
             # So a sensor a reload adds back goes out on its first change.
             self._sent = {key: sent for key, sent in self._sent.items() if key[1] in result.l1}
 
-    def _connect(self, profile: Profile, sensor: str, archive_id: str | None) -> _Connection:
+    def _connect(self, profile: Profile, sensor: str, archive_id: str | None) -> _SensorConnection:
         topic = profile.topic_for(sensor, archive_id)
         will = profile.will_for(sensor)
         last_will = None
         if topic is not None and will is not None:
             last_will = (topic, encode(will), profile.qos, profile.retain)
         parts = ["occupancy-service", profile.name, *([archive_id] if archive_id else []), sensor]
-        label = f"for sensor {sensor!r} on profile {profile.name}"
-        return _Connection(
-            self._settings, "-".join(parts), label, last_will, archive_id=archive_id, sensor=sensor
+        return _SensorConnection(
+            self._settings, "-".join(parts), last_will, archive_id, profile, sensor
         )
 
     def _send_on_fresh(self, result: L1Result) -> None:
@@ -357,11 +373,11 @@ class Publisher:
         if self._shared is not None and self._shared.fresh.is_set():
             self._shared.fresh.clear()
             self._send_all(self._shared_profiles, fresh=True)
-        for (name, sensor), connection in self._per_sensor.items():
+        for connection in self._per_sensor.values():
+            sensor = connection.sensor
             if connection.fresh.is_set() and sensor in result.l1:
                 connection.fresh.clear()
-                profile = next(p for p in self._per_sensor_profiles if p.name == name)
-                self._report(profile, sensor, result.l1[sensor], result, fresh=True)
+                self._report(connection.profile, sensor, result.l1[sensor], result, fresh=True)
 
     def _send_l0(self, result: L1Result) -> None:
         """A new L0, once, on each profile with an ``l0_topic``, not retained. Nothing goes out
