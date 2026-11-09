@@ -42,7 +42,7 @@ from occupancy_service.l0 import (
     detector_says,
     is_fresh,
 )
-from occupancy_service.l1_changes import L1Change, L1Subscription
+from occupancy_service.l1_changes import L1Changes, L1Subscription
 
 _log = logging.getLogger(__name__)
 
@@ -338,15 +338,12 @@ class L1Loop:
         self._geometry = self._geometry_from(archive)
         if self._drift is not None:
             self._drift.use(archive, self._geometry.dpt)
-        self._geometry_in_view = self._geometry
         self._scored: _Scored | None = None
         self._scored_at = 0.0
         self._camera_ok_since: float | None = None
         self._newest_times: _Scored | None = None  # Outlasts ``_scored`` when the camera is lost.
         self._results = Rate(_RATE_WINDOW)
-        self._states: dict[str, L1Entry] = {}
-        self._changes: dict[str, int] = {}
-        self._subscriptions: set[L1Subscription] = set()
+        self._changes = L1Changes()
         self._stopping = threading.Event()
         self._threads: list[threading.Thread] = []
         with self._lock:
@@ -397,14 +394,7 @@ class L1Loop:
         """Every L1 change from now on. The subscription's ``state`` leaves no gap before them."""
         with self._lock:
             self._advance()
-
-            def close() -> None:
-                with self._lock:
-                    self._subscriptions.discard(subscription)
-
-            subscription = L1Subscription(dict(self._states), close)
-            self._subscriptions.add(subscription)
-            return subscription
+            return self._changes.subscribe()
 
     def reload(self) -> None:
         """Read the manifest again, for the next frame to use, and rebuild the drift check. The
@@ -437,7 +427,7 @@ class L1Loop:
                 classify_ms=times.classify_ms if times is not None else None,
                 rate_fps=rate,
                 camera=self._source.status(),
-                changes=dict(self._changes),
+                changes=self._changes.counts(),
                 l0=l0_stats,
                 detector=self._detector_state,
             )
@@ -563,23 +553,11 @@ class L1Loop:
         )
 
     def _advance(self) -> L1Result:
-        """The newest result as it stands now, telling subscribers what that changes. The caller
-        holds the lock."""
+        """The newest result as it stands now, handed to ``L1Changes`` under the geometry it came
+        from. The caller holds the lock."""
         result = self._view()
-        for id, entry in result.l1.items():
-            before = self._states.get(id)
-            if before is None or (before.state, before.reason) != (entry.state, entry.reason):
-                if before is not None:
-                    self._changes[id] = self._changes.get(id, 0) + 1
-                for subscription in self._subscriptions:
-                    subscription.queue.put(L1Change(id, entry))
         geometry = self._scored.geometry if self._scored is not None else self._geometry
-        if geometry is not self._geometry_in_view:
-            self._geometry_in_view = geometry
-            for subscription in self._subscriptions:
-                subscription.outdated = True
-        self._states = dict(result.l1)
-        self._changes = {id: self._changes.get(id, 0) for id in result.l1}
+        self._changes.update(result.l1, geometry)
         return result
 
     def _view(self) -> L1Result:
