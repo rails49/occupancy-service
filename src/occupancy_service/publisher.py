@@ -5,9 +5,7 @@ import math
 import secrets
 import threading
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from paho.mqtt import client as paho
@@ -15,15 +13,9 @@ from paho.mqtt.enums import CallbackAPIVersion, MQTTErrorCode
 from paho.mqtt.properties import Properties
 from paho.mqtt.reasoncodes import ReasonCode
 
-from occupancy_service.active_profile import (
-    _REMOVED,
-    _STOPPED,
-    LastMessage,
-    _captured_at,
-    _ClearHold,
-)
+from occupancy_service.active_profile import ActiveProfile, LastMessage, Send
 from occupancy_service.l0 import L0, l0_json
-from occupancy_service.l1 import L1Change, L1Entry, L1Result, L1Subscription
+from occupancy_service.l1 import L1Result, L1Subscription
 from occupancy_service.profile import Profile, ProfileError, encode, load_profile
 
 _log = logging.getLogger(__name__)
@@ -181,36 +173,34 @@ class _SensorConnection(_Connection):
 class Publisher:
     """One connection for the profiles with a ``shared`` connection, and one for each sensor on
     each ``per_sensor`` profile. paho's threads keep them up and reconnect, and this class's own
-    thread does the sending, and opens and closes the connections of sensors a reload adds and
-    removes.
+    thread does the sending, through an ``ActiveProfile`` per profile, and opens and closes the
+    connections of sensors a reload adds and removes, and sends L0.
 
     It keeps no result: each message comes from ``latest()``, a change only saying when to send,
-    so a reload needs no restart and nothing it sends is older than ``latest()``. The one thing
-    it keeps, for a profile with a hold, is what that profile last reported.
+    so a reload needs no restart and nothing it sends is older than ``latest()``.
     """
 
     def __init__(self, settings: PublisherSettings, source: ResultSource) -> None:
         """Raises ``ProfileError`` for an active profile that is wrong."""
         self._settings = settings
         self._source = source
-        self._profiles = [load_profile(name) for name in settings.profiles]
-        names = [profile.name for profile in self._profiles]
+        profiles = [load_profile(name) for name in settings.profiles]
+        names = [profile.name for profile in profiles]
         for name in {name for name in names if names.count(name) > 1}:
             raise ProfileError(f"two active profiles are named {name}")
-        self._shared_profiles = [p for p in self._profiles if p.connection == "shared"]
-        self._per_sensor_profiles = [p for p in self._profiles if p.connection == "per_sensor"]
-        self._l0_profiles = [p for p in self._shared_profiles if p.l0_topic is not None]
-        self._l0_seen: L0 | None = None  # The newest L0 this has sent, or passed over.
-        self._holds = {
-            profile.name: _ClearHold(profile.clear_hold_s)
-            for profile in self._profiles
-            if profile.clear_hold_s > 0
+        self._active = {
+            profile.name: ActiveProfile(profile, self._sender(profile)) for profile in profiles
         }
-        self._lock = threading.Lock()
-        self._last: dict[str, dict[str, LastMessage]] = {}
-        self._refused: set[tuple[str, str]] = set()
-        # The topic and payload last sent, by profile name and sensor, on a profile with no repeat.
-        self._sent: dict[tuple[str, str], tuple[str, bytes]] = {}
+        self._shared_profiles = [
+            a for a in self._active.values() if a.profile.connection == "shared"
+        ]
+        self._per_sensor_profiles = [
+            a for a in self._active.values() if a.profile.connection == "per_sensor"
+        ]
+        self._l0_profiles = [
+            a.profile for a in self._shared_profiles if a.profile.l0_topic is not None
+        ]
+        self._l0_seen: L0 | None = None  # The newest L0 this has sent, or passed over.
         self._stopping = threading.Event()
         self._shared: _Connection | None = None
         # By profile name and sensor.
@@ -232,8 +222,11 @@ class Publisher:
 
     def last_messages(self) -> dict[str, dict[str, LastMessage]]:
         """Sensor id to profile name to what that profile last sent for it."""
-        with self._lock:
-            return {sensor: dict(by_profile) for sensor, by_profile in self._last.items()}
+        merged: dict[str, dict[str, LastMessage]] = {}
+        for name, active in self._active.items():
+            for sensor, last in active.last_messages().items():
+                merged.setdefault(sensor, {})[name] = last
+        return merged
 
     def _run(self) -> None:
         """Serves until ``stop()``. An error here ends publishing: it is logged, and every
@@ -244,11 +237,11 @@ class Publisher:
             if self._shared_profiles:
                 client_id = f"occupancy-service-{secrets.token_hex(4)}"
                 self._shared = _Connection(self._settings, client_id, "shared")
-            now = time.monotonic()
-            due = {p.name: now + p.repeat for p in self._profiles if p.repeat > 0}
             while not self._stopping.is_set():
-                self._serve_once(subscription, due)
-            self._send_all(self._profiles, stopping=True)
+                self._serve_once(subscription)
+            newest = self._source.latest()
+            for active in self._active.values():
+                active.stop(newest)
             connections = self._connections()
             for connection in connections:
                 connection.disconnect()
@@ -269,28 +262,25 @@ class Publisher:
             connections.append(self._shared)
         return connections
 
-    def _serve_once(self, subscription: L1Subscription, due: dict[str, float]) -> None:
-        """Every sensor on each new connection, each change as it comes, and every sensor on each
-        repeat. A change is told to the holds with no connection up too, as a break in ``clear``
-        restarts a hold."""
-        result = self._source.latest()
-        self._open_and_close(result)
+    def _serve_once(self, subscription: L1Subscription) -> None:
+        """One pass: waits for the first change or the next repeat, then sends what each new
+        connection carries, a new L0, and each active profile's step. A change is told to the
+        holds with no connection up too, as a break in ``clear`` restarts a hold."""
+        next_due = min((a.next_due() for a in self._active.values()), default=math.inf)
+        first = subscription.get(max(min(_WAKE, next_due - time.monotonic()), 0))
+        newest = self._source.latest()
+        # latest() queues each change up to its result before it returns, so after this no
+        # change up to that result is still unread.
+        changes = [] if first is None else [first]
+        while (change := subscription.get(0)) is not None:
+            changes.append(change)
+        self._open_and_close(newest)
         self._join_ended()
-        self._send_on_fresh(result)
-        self._send_l0(result)
-        next_due = min(due.values(), default=math.inf)
-        change = subscription.get(max(min(_WAKE, next_due - time.monotonic()), 0))
-        if change is not None:
-            self._send_change(change)
-        self._end_holds(subscription)
+        self._send_on_fresh(newest)
+        self._send_l0(newest)
         now = time.monotonic()
-        repeating = [p for p in self._profiles if p.name in due and due[p.name] <= now]
-        if repeating:
-            self._send_all(repeating)
-        for profile in repeating:
-            # On the same beat, unless it has fallen a whole interval behind.
-            next_at = due[profile.name] + profile.repeat
-            due[profile.name] = next_at if next_at > now else now + profile.repeat
+        for active in self._active.values():
+            active.step(changes, newest, now)
 
     def _open_and_close(self, result: L1Result) -> None:
         """A connection for each sensor of ``result`` on each ``per_sensor`` profile that can
@@ -298,28 +288,23 @@ class Publisher:
         disconnects cleanly. First it says ``unknown`` if its sensor has gone or its topic has
         changed, as nothing will send on that topic again. A sensor that keeps its topic says
         nothing, so a controller never sees a clear sensor go ``unknown`` and back for no reason."""
-        wanted: dict[tuple[str, str], Profile] = {}
-        for profile in self._per_sensor_profiles:
-            if result.archive_id is None and profile.needs_archive_id:
-                continue
+        wanted: dict[tuple[str, str], ActiveProfile] = {}
+        for active in self._per_sensor_profiles:
             for sensor in result.l1:
-                if profile.topic_for(sensor, result.archive_id) is not None:
-                    wanted[(profile.name, sensor)] = profile
+                if active.carries(sensor, result.archive_id):
+                    wanted[(active.profile.name, sensor)] = active
         for key, connection in list(self._per_sensor.items()):
             if key not in wanted or connection.archive_id != result.archive_id:
                 profile, sensor = connection.profile, connection.sensor
                 topic = profile.topic_for(sensor, connection.archive_id)
                 if key not in wanted or profile.topic_for(sensor, result.archive_id) != topic:
-                    self._publish(connection, profile, sensor, _REMOVED, connection.archive_id)
+                    self._active[profile.name].removed(sensor, connection.archive_id)
                 connection.disconnect()
                 self._closed.append(connection)
                 del self._per_sensor[key]
-        for key, profile in wanted.items():
+        for key, active in wanted.items():
             if key not in self._per_sensor:
-                self._per_sensor[key] = self._connect(profile, key[1], result.archive_id)
-        if any(sensor not in result.l1 for _, sensor in self._sent):
-            # So a sensor a reload adds back goes out on its first change.
-            self._sent = {key: sent for key, sent in self._sent.items() if key[1] in result.l1}
+                self._per_sensor[key] = self._connect(active.profile, key[1], result.archive_id)
 
     def _join_ended(self) -> None:
         """Joins and drops each closed connection whose thread has ended, and waits on none."""
@@ -343,12 +328,13 @@ class Publisher:
         """What each connection carries, when it has just connected."""
         if self._shared is not None and self._shared.fresh.is_set():
             self._shared.fresh.clear()
-            self._send_all(self._shared_profiles, fresh=True)
+            for active in self._shared_profiles:
+                active.fresh(result)
         for connection in self._per_sensor.values():
             sensor = connection.sensor
             if connection.fresh.is_set() and sensor in result.l1:
                 connection.fresh.clear()
-                self._report(connection.profile, sensor, result.l1[sensor], result, fresh=True)
+                self._active[connection.profile.name].fresh(result, sensor)
 
     def _send_l0(self, result: L1Result) -> None:
         """A new L0, once, on each profile with an ``l0_topic``, not retained. Nothing goes out
@@ -365,66 +351,22 @@ class Publisher:
             if topic is not None:
                 self._shared.client.publish(topic, body, profile.qos, retain=False)
 
-    def _send_change(self, change: L1Change) -> None:
-        """Sends the sensor's entry in the newest result, not the change's: a later change may
-        already have replaced it. Each hold is told the change's entry first, as a break in
-        ``clear`` restarts a hold even when ``latest()`` has already left it."""
-        result = self._source.latest()
-        entry = result.l1.get(change.sensor)
-        if entry is None:
-            return  # A reload has just removed it.
-        for profile in self._profiles:
-            hold = self._holds.get(profile.name)
-            if hold is not None:
-                hold.report(change.sensor, change.entry, _captured_at(result))
-            self._report(profile, change.sensor, entry, result)
+    def _sender(self, profile: Profile) -> Send:
+        """The ``send`` of ``profile``'s ``ActiveProfile``: on the connection that carries the
+        sensor, and only while it is up. What paho holds unacknowledged when a connection ends,
+        the next one drops: it would go out stale after the reconnect."""
 
-    def _end_holds(self, subscription: L1Subscription) -> None:
-        """Sends ``clear`` for each sensor whose hold the newest result ends, where it can be sent:
-        until then the profile says what it last published."""
-        if not self._holds:
-            return
-        result = self._source.latest()
-        self._forget_all_but(result.l1)
-        # latest() queues each change up to its result before it returns, so after this no break
-        # in ``clear`` up to that result is still unread.
-        while (change := subscription.get(0)) is not None:
-            self._send_change(change)
-        captured_at = _captured_at(result)
-        for profile in self._profiles:
-            hold = self._holds.get(profile.name)
-            if hold is None:
-                continue
-            for sensor, entry in result.l1.items():
-                connection = self._connection(profile, sensor, result.archive_id)
-                if connection is None or not connection.is_connected():
-                    continue
-                if hold.release(sensor, entry, captured_at):
-                    self._send(profile, sensor, entry, result.archive_id)
+        def send(
+            sensor: str, archive_id: str | None, topic: str, body: bytes, qos: int, retain: bool
+        ) -> bool:
+            connection = self._connection(profile, sensor, archive_id)
+            if connection is None or not connection.is_connected():
+                return False  # Each new connection sends what it carries.
+            sent = connection.client.publish(topic, body, qos, retain)
+            # Else the connection has just ended, and the next one sends what it carries.
+            return sent.rc == MQTTErrorCode.MQTT_ERR_SUCCESS
 
-    def _send_all(
-        self, profiles: list[Profile], stopping: bool = False, fresh: bool = False
-    ) -> None:
-        """Every sensor in the newest result, on ``profiles``. ``fresh`` for a new connection."""
-        result = self._source.latest()
-        self._forget_all_but(result.l1)
-        for profile in profiles:
-            for sensor, entry in result.l1.items():
-                self._report(profile, sensor, _STOPPED if stopping else entry, result, fresh)
-
-    def _report(
-        self,
-        profile: Profile,
-        sensor: str,
-        entry: L1Entry,
-        result: L1Result,
-        fresh: bool = False,
-    ) -> None:
-        """Sends ``entry``, or on a profile holding this sensor what that profile last reported."""
-        hold = self._holds.get(profile.name)
-        if hold is not None:
-            entry = hold.report(sensor, entry, _captured_at(result))
-        self._send(profile, sensor, entry, result.archive_id, fresh)
+        return send
 
     def _connection(
         self, profile: Profile, sensor: str, archive_id: str | None
@@ -436,62 +378,3 @@ class Publisher:
         return (
             connection if connection is not None and connection.archive_id == archive_id else None
         )
-
-    def _send(
-        self,
-        profile: Profile,
-        sensor: str,
-        entry: L1Entry,
-        archive_id: str | None,
-        fresh: bool = False,
-    ) -> None:
-        if archive_id is None and profile.needs_archive_id:
-            return
-        if profile.topic_for(sensor, archive_id) is None:
-            if (profile.name, sensor) not in self._refused:
-                self._refused.add((profile.name, sensor))
-                _log.warning(
-                    "profile %s cannot put sensor %r in a topic, and will not report it",
-                    profile.name,
-                    sensor,
-                )
-            return
-        connection = self._connection(profile, sensor, archive_id)
-        if connection is not None:
-            self._publish(connection, profile, sensor, entry, archive_id, fresh)
-
-    def _publish(
-        self,
-        connection: _Connection,
-        profile: Profile,
-        sensor: str,
-        entry: L1Entry,
-        archive_id: str | None,
-        fresh: bool = False,
-    ) -> None:
-        """Sends ``entry`` on ``connection``. On a profile with no repeat, only what differs from
-        what went last, unless ``fresh``: a new connection sends everything it carries."""
-        # Not while it is down. What paho holds unacknowledged when a connection ends, the next
-        # one drops: it would go out stale after the reconnect.
-        topic = profile.topic_for(sensor, archive_id)
-        if topic is None or not connection.is_connected():
-            return  # Each new connection sends what it carries.
-        message = profile.message_for(sensor, entry)
-        body = encode(message)
-        key = (profile.name, sensor)
-        if profile.repeat == 0 and not fresh and self._sent.get(key) == (topic, body):
-            return
-        sent = connection.client.publish(topic, body, profile.qos, profile.retain)
-        if sent.rc != MQTTErrorCode.MQTT_ERR_SUCCESS:
-            return  # The connection has just ended, and the next one sends what it carries.
-        if profile.repeat == 0:
-            self._sent[key] = (topic, body)
-        with self._lock:
-            by_profile = self._last.setdefault(sensor, {})
-            by_profile[profile.name] = LastMessage(message, datetime.now(UTC))
-
-    def _forget_all_but(self, sensors: Mapping[str, L1Entry]) -> None:
-        with self._lock:
-            self._last = {id: messages for id, messages in self._last.items() if id in sensors}
-        for hold in self._holds.values():
-            hold.forget_all_but(sensors)
