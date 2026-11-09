@@ -17,7 +17,7 @@ Nothing here is a safety interlock.
 | URL | Required | Holds |
 | :--- | :--- | :--- |
 | `GET <base>/latest` | yes | The latest frame and its L1 |
-| `GET <base>/events` | yes | Every L1 change |
+| `GET <base>/events` | yes | Every [L1 change](GLOSSARY.md#l1-change) |
 | `<base>/archive/` | yes | The archive |
 | `PUT` and `DELETE` under `<base>/archive/` | no | [Saving](#saving) back to the archive |
 
@@ -78,7 +78,7 @@ Everything except `l0`, `detector`, `drift`, `last_messages` and the `timings` o
 | `scores` | object | Sensor id to P(occupied), from 0 to 1. |
 | `threshold` | number from 0 to 1 | The number a score is compared with. |
 | `patches` | object | Sensor id to the name of a part in this answer, such as `patch-0`, a different part for each sensor. A sensor with no patch has no entry. Sent only in answer to `?patches=1`. |
-| `changes` | object | Sensor id to the count of L1 changes, an integer from 0. |
+| `changes` | object | Sensor id to the count of [L1 changes](GLOSSARY.md#l1-change), an integer from 0. |
 | `timings` | object | Any of `capture_ms`, `decode_ms`, `cut_ms`, `classify_ms`, `rate_fps`, `detect_ms`, `l0_rate_fps` and `l0_age_ms`, each a number from 0. The last three are the detector's: its newest run, its rate of runs, and the age of its newest L0, however old. |
 | `camera` | object | Any of `state` (`ok` or `lost`), `rate_fps` and `frame_age_ms`, the last two numbers from 0. |
 | `drift` | object | How far the camera has moved, from its own sampled frame. See [Drift](#drift). |
