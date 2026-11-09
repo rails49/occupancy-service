@@ -16,6 +16,9 @@ A TOML file that says how L1 goes out over MQTT, and L0 where it has an L0 topic
 **Active profile**:
 A profile the service publishes on, with what it has sent and what it is holding.
 
+**L1 change**:
+A sensor's new state or new reason, or the first state of a sensor a reload brought. A new confidence alone is not one.
+
 ### Owned elsewhere
 
 **Archive**:
