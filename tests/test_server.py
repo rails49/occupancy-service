@@ -33,10 +33,10 @@ from fake_l1 import (
 )
 from PIL import Image
 
+from occupancy_service.active_profile import LastMessage
 from occupancy_service.capture import Frame
 from occupancy_service.l1 import L1Loop, L1Settings
 from occupancy_service.live_check import check
-from occupancy_service.publisher import LastMessage
 from occupancy_service.server import LiveServer, ServerSettings
 
 ONE_SENSOR = {"s1": (160.0, 120.0)}
