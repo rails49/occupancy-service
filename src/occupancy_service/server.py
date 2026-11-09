@@ -127,6 +127,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._unread: int | None = 0  # Bytes left of a write's body. None when that is not known.
         super().__init__(*args)
 
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except OSError:
+            self.close_connection = True  # The client has gone.
+
     def do_GET(self) -> None:
         path, _, query = self.path.partition("?")
         try:
