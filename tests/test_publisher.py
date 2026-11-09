@@ -1262,6 +1262,35 @@ def test_rocrail_with_no_archive_id_reports_every_sensor_true(broker: Broker) ->
     ]
 
 
+def test_a_message_a_stalled_broker_never_acknowledged_does_not_reach_the_next_one(
+    broker: Broker, tmp_path: Path
+) -> None:
+    """At QoS 1 with no repeat, as on Rocrail: only the state at the reconnect goes out."""
+    path = profile_file(
+        tmp_path,
+        topic="t/{sensor}",
+        repeat=0,
+        qos=1,
+        occupied='"ON"',
+        clear='"OFF"',
+        unknown='"ON"',
+    )
+    source = FakeResults({"a": CLEAR})
+    with publishing(source, settings_for(broker, path)):
+        with subscribed(broker, qos=1) as before:
+            before.wait_for(lambda m: m.payload == b"OFF")
+        broker.stall()
+        source.show({"a": OCCUPIED})
+        time.sleep(0.3)  # Sent, on a connection that still looks up, and never acknowledged.
+        broker.kill()
+        source.show({"a": CLEAR})
+        broker.start()  # The publisher tries again after 1 s, and this subscriber is up by then.
+        with subscribed(broker, qos=1) as after:
+            after.wait_for(lambda m: m.topic == "t/a")
+            time.sleep(0.5)
+            assert payloads(after) == [b"OFF"]
+
+
 def test_no_python_file_under_src_names_rocrail() -> None:
     src = Path(__file__).parent.parent / "src"
     named = [path for path in src.rglob("*.py") if "rocrail" in path.read_text().lower()]
