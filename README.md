@@ -81,7 +81,7 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 
 ## L0
 
-The detector is `rails49-detector`, which is AGPL and installed separately: no dependency of this package names it, and CI installs it nowhere. `occupancy_service.detector_model` is the one module that imports it, and only when `L1Settings.detector_model` is set. With that empty, the default, the service runs as it would without the detector. The image's build argument for installing it belongs to rails49/occupancy-service#6.
+The detector is `rails49-detector`, which is AGPL and installed separately: no dependency of this package names it, and CI installs it nowhere. `occupancy_service.detector_model` is the one module that imports it, and only when `L1Settings.detector_model` is set. With that empty, the default, the service runs as it would without the detector. The [image](#box) installs it only when asked.
 
 The model loads once, at start, as the classifier's does, and a restart tries again. `latest` reports the load in `detector`: `ok`, or `failed` with the reason. A detector that raises or hangs after a good load stays `ok`: its L0 goes stale, `l0_age_ms` grows, and the log says why.
 
@@ -308,10 +308,55 @@ In automatic mode, `unknown`, or a false detection, on a block with no train is 
 
 Rocrail does not notice a hung service whose connections stay up, nor a lost broker: its sensors keep the last state the service sent.
 
+## Box
+
+`compose.yaml` runs the service and the [occupancy page](https://github.com/rails49/occupancy) behind the box's door. Both containers join the installation's `rails49` network and publish no ports. `occupancy.$BOX_DOMAIN` goes to the page, and `/live` on that host goes to the service, with the prefix kept. The page talks to the service on its own origin.
+
+The installation runs first: it creates the network and runs `broker`, which the service dials on port 1883. Then, from a clone of this repository:
+
+```sh
+OCCUPANCY_ARCHIVE=/srv/rails49/layout.r49 \
+OCCUPANCY_CAMERA=/dev/v4l/by-id/usb-<camera>-video-index0 \
+TC49_UID=$(id -u) TC49_GID=$(id -g) \
+VIDEO_GID=$(getent group video | cut -d: -f3) \
+RENDER_GID=$(getent group render | cut -d: -f3) \
+docker compose --env-file /etc/rails49/box.env -f compose.yaml up -d --build
+```
+
+| Setting | Holds | Default |
+| :--- | :--- | :--- |
+| `BOX_DOMAIN` | The box's domain, from `/etc/rails49/box.env` | None |
+| `OCCUPANCY_ARCHIVE` | The archive's path on the box, mounted read-write | None |
+| `OCCUPANCY_CAMERA` | The camera's path, under `/dev/v4l/by-id/` | None |
+| `TC49_UID`, `TC49_GID` | The user and group the service runs as, so the files it saves are the person's | None |
+| `VIDEO_GID`, `RENDER_GID` | The host's `video` and `render` groups, for the camera and the GPU | None |
+| `DETECTOR_VERSION` | The `rails49-detector` version the image installs | Empty: no detector |
+
+Compose names a missing setting and starts nothing.
+
+The service runs the `occupancy` and `control` profiles, with OpenVINO on the GPU. It restarts unless stopped, so an archive that could not be read is picked up again once it is repaired. The host's `/dev` is mounted, with video devices and the GPU allowed, so a camera that is unplugged and plugged back in appears with no restart.
+
+The page can save only to an archive that is a folder named `*.r49`. A zip is served, and refuses saves. To make a folder from a zip:
+
+```sh
+mv layout.r49 layout.zip && unzip layout.zip -d layout.r49
+```
+
+The page is built from the `rails49/occupancy` commit in `OCCUPANCY_COMMIT` in `compose.yaml`, and nginx sets the headers its `_headers` names. Moving to a new commit is a PR that changes that line.
+
+`DETECTOR_VERSION=0.0.2` on the start command builds the service image with that version of `rails49-detector` (AGPL) from PyPI. Running it also needs `--detector-model` in the service's `command`, which rails49/occupancy-service#13 sets.
+
+Two steps belong to the box and are not code here:
+
+- An `A` record for the `occupancy` label. The door gets a certificate per router, and holds no wildcard.
+- `occupancy` in `BOX_UIS` in `/etc/rails49/box.env`, so the installation's page links the UI.
+
 ## Test
 
 ```sh
-bin/test.sh             # Ruff, Black, Pyright and pytest
+bin/test.sh             # Ruff, Black, Pyright, docker compose config and pytest
 ```
+
+`tests/test_compose.py` reads the compose project as `docker compose config` resolves it, which needs the docker CLI and no daemon. `tests/test_images.py` runs against built images, and only when `OCCUPANCY_SERVICE_IMAGE` and `OCCUPANCY_PAGE_IMAGE` name them. CI's `images` job builds both, the service's without the detector, and sets them.
 
 The L1 tests use a fake capture source and the packaged model, on the CPU. The detector's tests use a fake detector, and the tests of the command a fake `detector` module on the child's path, so no AGPL package is installed. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.

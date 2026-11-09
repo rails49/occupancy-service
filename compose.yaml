@@ -1,0 +1,72 @@
+# The occupancy service and the occupancy page, behind the door. The README's
+# "Box" section gives the settings and the command that starts it.
+
+name: occupancy
+
+services:
+  service:
+    build:
+      context: .
+      dockerfile: deploy/service.Dockerfile
+      args:
+        DETECTOR_VERSION: ${DETECTOR_VERSION:-}
+    restart: unless-stopped
+    user: "${TC49_UID:?}:${TC49_GID:?}"
+    group_add:
+      - "${VIDEO_GID:?}"
+      - "${RENDER_GID:?}"
+    # The host's /dev, so a replugged camera appears with no restart. 81 is
+    # video4linux, 226 is the GPU.
+    device_cgroup_rules:
+      - "c 81:* rmw"
+      - "c 226:* rmw"
+    volumes:
+      - type: bind
+        source: /dev
+        target: /dev
+      - type: bind
+        source: ${OCCUPANCY_ARCHIVE:?the archive's path on the box}
+        target: /archive.r49
+        bind:
+          create_host_path: false
+    command:
+      - --archive=/archive.r49
+      - --camera=${OCCUPANCY_CAMERA:?the camera's path, under /dev/v4l/by-id/}
+      - --broker=broker:1883
+      - --profile=occupancy
+      - --profile=control
+      - --address=0.0.0.0
+      - --port=8000
+      - --engine=openvino
+      - --device=GPU
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=rails49
+      - traefik.http.routers.occupancy-live.rule=Host(`occupancy.${BOX_DOMAIN:?start this with --env-file /etc/rails49/box.env}`) && PathPrefix(`/live`)
+      - traefik.http.routers.occupancy-live.entrypoints=websecure
+      - traefik.http.routers.occupancy-live.tls.certresolver=le
+      - traefik.http.services.occupancy-live.loadbalancer.server.port=8000
+    networks:
+      - rails49
+
+  page:
+    build:
+      context: .
+      dockerfile: deploy/page.Dockerfile
+      args:
+        # The rails49/occupancy commit the page is built from.
+        OCCUPANCY_COMMIT: 45d6651d604c44390238367f4ad6e57c4983fcd8
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=rails49
+      - traefik.http.routers.occupancy.rule=Host(`occupancy.${BOX_DOMAIN:?start this with --env-file /etc/rails49/box.env}`)
+      - traefik.http.routers.occupancy.entrypoints=websecure
+      - traefik.http.routers.occupancy.tls.certresolver=le
+      - traefik.http.services.occupancy.loadbalancer.server.port=80
+    networks:
+      - rails49
+
+networks:
+  rails49:
+    external: true
