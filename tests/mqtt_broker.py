@@ -22,7 +22,7 @@ def mosquitto() -> str | None:
     return shutil.which("mosquitto", path=f"{os.environ.get('PATH', '')}:{_SYSTEM_PATHS}")
 
 
-def _free_port() -> int:
+def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
@@ -33,7 +33,7 @@ class Broker:
 
     def __init__(self, binary: str, folder: Path) -> None:
         self.binary = binary
-        self.port = _free_port()
+        self.port = free_port()
         self.log = folder / "mosquitto.log"
         self.process: subprocess.Popen[bytes] | None = None
         self.log_file: IO[bytes] | None = None
