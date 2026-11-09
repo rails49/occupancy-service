@@ -1291,6 +1291,61 @@ def test_a_message_a_stalled_broker_never_acknowledged_does_not_reach_the_next_o
             assert payloads(after) == [b"OFF"]
 
 
+class FailingResults(FakeResults):
+    """A result source whose ``latest()`` raises once ``failing`` is set."""
+
+    failing = False
+
+    def latest(self) -> L1Result:
+        if self.failing:
+            raise RuntimeError("the source broke")
+        return super().latest()
+
+
+def closed_clients(broker: Broker) -> list[str]:
+    """Those that ended with no DISCONNECT, whose wills the broker sends."""
+    return re.findall(r"Client (occupancy-service-\S+) closed its connection\.", read(broker))
+
+
+def publisher_errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == "occupancy_service.publisher" and record.levelno >= logging.ERROR
+    ]
+
+
+def test_an_error_in_the_sending_loop_is_logged_and_ends_every_connection_with_its_will(
+    broker: Broker, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = FailingResults({"a": CLEAR, "b": CLEAR})
+    settings = settings_for(broker, "jmri", "occupancy")
+    with subscribed(broker) as subscriber, publishing(source, settings):
+        wait_for(lambda: subscriber.on(JMRI + "a") and subscriber.on(JMRI + "b"))
+        wait_for(lambda: subscriber.on(OWN + "a") and subscriber.on(OWN + "b"))
+        source.failing = True
+        for id in "ab":  # Each sensor's will.
+            subscriber.wait_for(lambda m, id=id: m.topic == JMRI + id and m.payload == b"ACTIVE")
+        wait_for(lambda: len(closed_clients(broker)) == 3)
+        assert len(set(connected_clients(broker))) == 3
+        assert disconnected_clients(broker) == []
+        time.sleep(0.3)
+        assert len(publisher_errors(caplog)) == 1
+    (error,) = publisher_errors(caplog)
+    assert error.exc_info is not None and "the source broke" in str(error.exc_info[1])
+    assert {m.payload for m in retained(broker, [JMRI + "a", JMRI + "b"]).values()} == {b"ACTIVE"}
+
+
+def test_a_connection_that_cannot_be_made_is_logged_and_stop_returns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    publisher = Publisher(PublisherSettings(host=""), FakeResults({"a": CLEAR}))
+    publisher.start()
+    wait_for(lambda: publisher_errors(caplog))
+    publisher.stop()
+    assert len(publisher_errors(caplog)) == 1
+
+
 def test_no_python_file_under_src_names_rocrail() -> None:
     src = Path(__file__).parent.parent / "src"
     named = [path for path in src.rglob("*.py") if "rocrail" in path.read_text().lower()]
