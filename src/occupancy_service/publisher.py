@@ -133,6 +133,8 @@ class _Connection:
         client.reconnect_delay_set(settings.retry_every, settings.retry_every)
         client.connect_async(settings.host, settings.port, settings.keepalive)
         client.loop_start()
+        # paho 2.2 has no public handle on its thread: ``_thread`` is it, until it ends.
+        self._thread: threading.Thread | None = client._thread
 
     def is_connected(self) -> bool:
         return self.client.is_connected()
@@ -144,6 +146,12 @@ class _Connection:
 
     def join(self) -> None:
         self.client.loop_stop()
+
+    def has_ended(self) -> bool:
+        """Whether paho's thread has ended, so that ``join`` returns at once. After
+        ``disconnect``, it ends soon after the DISCONNECT goes out, or with no connection up,
+        after its connect attempt or its wait to retry."""
+        return self._thread is None or not self._thread.is_alive()
 
     def abandon(self) -> None:
         """Ends the connection with no DISCONNECT, so the broker sends its will, and sends
@@ -312,6 +320,7 @@ class Publisher:
         restarts a hold."""
         result = self._source.latest()
         self._open_and_close(result)
+        self._join_ended()
         self._send_on_fresh(result)
         self._send_l0(result)
         next_due = min(due.values(), default=math.inf)
@@ -356,6 +365,13 @@ class Publisher:
         if any(sensor not in result.l1 for _, sensor in self._sent):
             # So a sensor a reload adds back goes out on its first change.
             self._sent = {key: sent for key, sent in self._sent.items() if key[1] in result.l1}
+
+    def _join_ended(self) -> None:
+        """Joins and drops each closed connection whose thread has ended, and waits on none."""
+        ended = [connection for connection in self._closed if connection.has_ended()]
+        for connection in ended:
+            connection.join()
+            self._closed.remove(connection)
 
     def _connect(self, profile: Profile, sensor: str, archive_id: str | None) -> _SensorConnection:
         topic = profile.topic_for(sensor, archive_id)

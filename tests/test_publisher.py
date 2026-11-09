@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -22,14 +23,14 @@ from fake_l1 import (
     wait_for,
     write_archive,
 )
-from mqtt_broker import Broker, Received, Subscriber, mosquitto
+from mqtt_broker import Broker, Received, Subscriber, free_port, mosquitto
 
 from occupancy_service.capture import Frame
 from occupancy_service.l0 import L0
 from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings, L1Subscription
 from occupancy_service.live_check import check
 from occupancy_service.profile import ProfileError
-from occupancy_service.publisher import Publisher, PublisherSettings
+from occupancy_service.publisher import Publisher, PublisherSettings, _Connection
 from occupancy_service.server import LiveServer, ServerSettings
 
 CLEAR = L1Entry("clear")
@@ -1344,6 +1345,68 @@ def test_a_connection_that_cannot_be_made_is_logged_and_stop_returns(
     wait_for(lambda: publisher_errors(caplog))
     publisher.stop()
     assert len(publisher_errors(caplog)) == 1
+
+
+def jmri_threads() -> list[str]:
+    """The name of each paho thread running for a ``jmri`` sensor."""
+    prefix = "paho-mqtt-client-occupancy-service-jmri-"
+    return [t.name for t in threading.enumerate() if t.name.startswith(prefix)]
+
+
+def test_a_closed_connection_is_joined_and_dropped_while_serving(broker: Broker) -> None:
+    source = FakeResults({"kept": CLEAR})
+    with publishing(source, settings_for(broker, "jmri")) as publisher:
+        wait_for(lambda: "occupancy-service-jmri-archive-1-kept" in connected_clients(broker))
+        for round in range(1, 6):
+            # A sensor removed, and every connection on an archive ``id`` change.
+            source.show({"kept": CLEAR, f"r{round}": CLEAR}, archive_id=f"archive-{round % 2}")
+            ids = [
+                f"occupancy-service-jmri-archive-{round % 2}-{id}" for id in ("kept", f"r{round}")
+            ]
+            wait_for(lambda ids=ids: set(ids) <= set(connected_clients(broker)))
+        source.show({"kept": CLEAR}, archive_id="archive-1")
+        wait_for(lambda: "occupancy-service-jmri-archive-1-r5" in disconnected_clients(broker))
+        kept = ["paho-mqtt-client-occupancy-service-jmri-archive-1-kept"]
+        wait_for(lambda: not publisher._closed and jmri_threads() == kept)  # With no stop().
+
+
+class CountingResults(FakeResults):
+    """A result source that counts each ``latest()``: one or more on each pass of the loop."""
+
+    calls = 0
+
+    def latest(self) -> L1Result:
+        self.calls += 1
+        return super().latest()
+
+
+def test_a_connection_that_never_reached_the_broker_is_dropped_once_its_thread_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    holding, release = threading.Event(), threading.Event()
+    on_connect_fail = _Connection._on_connect_fail
+
+    def held(connection: _Connection, client: Any, userdata: Any) -> None:
+        """Keeps the removed sensor's paho thread in a failed connect until ``release``."""
+        on_connect_fail(connection, client, userdata)
+        if "'removed'" in connection.label:
+            holding.set()
+            release.wait(10)
+
+    monkeypatch.setattr(_Connection, "_on_connect_fail", held)
+    source = CountingResults({"kept": CLEAR, "removed": CLEAR})
+    nothing_listens = PublisherSettings(host="127.0.0.1", port=free_port(), profiles=("jmri",))
+    with publishing(source, nothing_listens) as publisher:
+        closed = publisher._closed
+        wait_for(holding.is_set)
+        source.show({"kept": CLEAR})
+        wait_for(lambda: closed)
+        calls = source.calls
+        wait_for(lambda: source.calls > calls + 10)  # Serving, with the thread not ended.
+        assert len(closed) == 1
+        release.set()
+        wait_for(lambda: not closed)
+        assert jmri_threads() == ["paho-mqtt-client-occupancy-service-jmri-archive-1-kept"]
 
 
 def test_no_python_file_under_src_names_rocrail() -> None:
