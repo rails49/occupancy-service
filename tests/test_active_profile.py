@@ -9,7 +9,8 @@ import pytest
 
 from occupancy_service.active_profile import ActiveProfile
 from occupancy_service.capture import Frame
-from occupancy_service.l1 import L1Change, L1Entry, L1Result
+from occupancy_service.l1 import L1Entry, L1Result
+from occupancy_service.l1_changes import L1Change
 from occupancy_service.profile import Profile
 
 CLEAR = L1Entry("clear")
