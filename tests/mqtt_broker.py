@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -56,8 +57,21 @@ class Broker:
                     ) from error
                 time.sleep(0.01)
 
+    def stall(self) -> None:
+        """Stops the broker without closing anything: what is sent to it is neither read nor
+        acknowledged, and a connection to it still looks up."""
+        assert self.process is not None
+        self.process.send_signal(signal.SIGSTOP)
+
+    def kill(self) -> None:
+        """Ends the broker at once, stalled or not. It keeps nothing."""
+        if self.process is not None:
+            self.process.kill()
+        self.stop()
+
     def stop(self) -> None:
         if self.process is not None:
+            self.process.send_signal(signal.SIGCONT)  # A stalled broker takes no SIGTERM.
             self.process.terminate()
             self.process.wait(10)
             self.process = None

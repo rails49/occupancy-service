@@ -103,8 +103,9 @@ class _ClearHold:
 
 
 class _Connection:
-    """One paho client, which paho's thread keeps up and reconnects. Each new connection sets
-    ``fresh``, for the publisher's thread to take and send what this connection carries."""
+    """One paho client, which paho's thread keeps up and reconnects. Each new connection drops
+    what paho still holds from the one before, then sets ``fresh``, for the publisher's thread to
+    take and send what this connection carries."""
 
     def __init__(
         self,
@@ -160,6 +161,9 @@ class _Connection:
         settings = self._settings
         _log.info("connected %s to the broker at %s:%s", self.label, settings.host, settings.port)
         self._log_connect_failure = True
+        # A QoS 1 or 2 message the broker never acknowledged, which paho would send again after
+        # this callback returns. It is stale by now: ``fresh`` sends what is current instead.
+        client.drop_out_messages()
         self.fresh.set()
 
     def _on_connect_fail(self, client: paho.Client, userdata: Any) -> None:
@@ -457,7 +461,8 @@ class Publisher:
     ) -> None:
         """Sends ``entry`` on ``connection``. On a profile with no repeat, only what differs from
         what went last, unless ``fresh``: a new connection sends everything it carries."""
-        # Not while it is down: paho would keep a QoS 1 or 2 message, and send it stale later.
+        # Not while it is down. What paho holds unacknowledged when a connection ends, the next
+        # one drops: it would go out stale after the reconnect.
         topic = profile.topic_for(sensor, archive_id)
         if topic is None or not connection.is_connected():
             return  # Each new connection sends what it carries.
