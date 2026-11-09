@@ -8,9 +8,10 @@ import subprocess
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -23,6 +24,7 @@ _RETRY_WAIT = 1.0  # Seconds between the end of one ffmpeg and the start of the 
 _KILL_WAIT = 1.0  # Seconds to wait for a killed ffmpeg, which may be stuck in a USB call.
 _RATE_WINDOW = 2.0  # Seconds of arrivals the capture rate is measured over.
 _POLL = 0.05  # Seconds between looks at the pipe, the hang limit and stop().
+_FRAME_POLL = 0.01  # Seconds between looks for a new frame.
 _READ_SIZE = 1 << 16
 _SOI, _EOI, _SOS = 0xD8, 0xD9, 0xDA
 _UNDECODABLE = (OSError, ValueError, SyntaxError, Image.DecompressionBombError)
@@ -48,6 +50,54 @@ class Frame:
     jpeg: bytes
     id: int
     arrived_at: datetime
+
+    def age_ms(self) -> float:
+        """Milliseconds since the frame reached Python."""
+        return max((datetime.now(UTC) - self.arrived_at).total_seconds() * 1000, 0.0)
+
+
+class FrameSource(Protocol):
+    """Where frames come from: a ``Capture``, or a test's fake."""
+
+    def latest(self) -> Frame | None: ...
+
+
+def each_new_frame(
+    source: FrameSource, stopping: threading.Event, handle: Callable[[Frame], None], every: float
+) -> None:
+    """Calls ``handle`` with each newest frame it has not had, and waits ``every`` seconds after
+    each call, until ``stopping`` is set."""
+    seen: int | None = None
+    while not stopping.is_set():
+        frame = source.latest()
+        if frame is None or frame.id == seen:
+            stopping.wait(_FRAME_POLL)
+            continue
+        seen = frame.id
+        handle(frame)
+        stopping.wait(every)
+
+
+class Rate:
+    """Events per second over the last ``window`` seconds of ``time.monotonic()``. Its owner holds
+    the lock."""
+
+    def __init__(self, window: float) -> None:
+        self._window = window
+        self._at: deque[float] = deque()
+
+    def add(self, now: float) -> None:
+        self._at.append(now)
+        self._forget(now)
+
+    def per_second(self, now: float) -> float:
+        self._forget(now)
+        count = len(self._at)
+        return (count - 1) / (now - self._at[0]) if count > 1 else 0.0
+
+    def _forget(self, now: float) -> None:
+        while self._at and self._at[0] < now - self._window:
+            self._at.popleft()
 
 
 def decode(jpeg: bytes) -> npt.NDArray[np.uint8] | None:
@@ -99,7 +149,7 @@ class Capture:
         self._lock = threading.Lock()
         self._latest: Frame | None = None
         self._next_id = 1
-        self._arrivals: deque[float] = deque()
+        self._arrivals = Rate(_RATE_WINDOW)
         self._last_arrival: float | None = None
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
@@ -123,9 +173,7 @@ class Capture:
     def status(self) -> CaptureStatus:
         now = time.monotonic()
         with self._lock:
-            self._forget_arrivals(now)
-            count = len(self._arrivals)
-            rate = (count - 1) / (now - self._arrivals[0]) if count > 1 else 0.0
+            rate = self._arrivals.per_second(now)
             last = self._last_arrival
         if last is None:
             return CaptureStatus("lost", None, rate)
@@ -179,12 +227,7 @@ class Capture:
             self._latest = Frame(jpeg, self._next_id, datetime.now(UTC))
             self._next_id += 1
             self._last_arrival = now
-            self._arrivals.append(now)
-            self._forget_arrivals(now)
-
-    def _forget_arrivals(self, now: float) -> None:
-        while self._arrivals and self._arrivals[0] < now - _RATE_WINDOW:
-            self._arrivals.popleft()
+            self._arrivals.add(now)
 
 
 class _JpegSplitter:
