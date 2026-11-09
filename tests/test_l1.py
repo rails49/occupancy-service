@@ -30,7 +30,8 @@ from fake_l1 import (
 )
 
 from occupancy_service.capture import Capture, CaptureSettings, Frame
-from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings, Scoring
+from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Settings, Scoring
+from occupancy_service.l1_changes import L1Change
 
 
 def served(loop: L1Loop, frame: Frame) -> L1Result:

@@ -7,7 +7,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from occupancy_service.l1 import L1Change, L1Entry, L1Result
+from occupancy_service.l1 import L1Entry, L1Result
+from occupancy_service.l1_changes import L1Change
 from occupancy_service.profile import Message, Profile, encode
 
 _log = logging.getLogger(__name__)

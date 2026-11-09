@@ -7,7 +7,6 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Empty, SimpleQueue
 from typing import Literal, Protocol
 
 import classifier
@@ -43,6 +42,7 @@ from occupancy_service.l0 import (
     detector_says,
     is_fresh,
 )
+from occupancy_service.l1_changes import L1Change, L1Subscription
 
 _log = logging.getLogger(__name__)
 
@@ -131,39 +131,6 @@ class DetectorState:
 
     state: Literal["ok", "failed"]
     reason: str | None = None
-
-
-@dataclass(frozen=True)
-class L1Change:
-    """A sensor's new state or new reason, or the first state of a sensor a reload brought."""
-
-    sensor: str
-    entry: L1Entry
-
-
-class L1Subscription:
-    """The L1 changes since ``state``, each sensor's L1 when this subscription began.
-
-    Changes wait here until they are read, so close it when done. ``outdated`` turns true at the
-    first result under a manifest newer than ``state``. Changes keep coming after that, but none
-    says that a sensor has gone, so a reader that needs the list of sensors subscribes again.
-    """
-
-    def __init__(self, state: Mapping[str, L1Entry], close: Callable[[], None]) -> None:
-        self.state = state
-        self.queue: SimpleQueue[L1Change] = SimpleQueue()
-        self.outdated = False
-        self._close = close
-
-    def get(self, timeout: float | None = None) -> L1Change | None:
-        """The next change. None when there is none within ``timeout`` seconds."""
-        try:
-            return self.queue.get(timeout=timeout)
-        except Empty:
-            return None
-
-    def close(self) -> None:
-        self._close()
 
 
 @dataclass(frozen=True)

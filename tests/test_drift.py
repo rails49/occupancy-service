@@ -25,7 +25,8 @@ from PIL import Image
 
 from occupancy_service.capture import Frame
 from occupancy_service.drift import DriftCheck, DriftReading, DriftUnmeasured, gray_of
-from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings
+from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Settings
+from occupancy_service.l1_changes import L1Change
 
 _SHARED = json.loads((Path(__file__).parent.parent / "conformance" / "drift.json").read_text())
 

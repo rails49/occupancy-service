@@ -16,7 +16,8 @@ from paho.mqtt.reasoncodes import ReasonCode
 
 from occupancy_service.active_profile import ActiveProfile, LastMessage, Send
 from occupancy_service.l0 import L0, l0_json
-from occupancy_service.l1 import L1Result, L1Subscription
+from occupancy_service.l1 import L1Result
+from occupancy_service.l1_changes import L1Subscription
 from occupancy_service.profile import Profile, ProfileError, encode, load_profile
 
 _log = logging.getLogger(__name__)

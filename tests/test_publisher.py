@@ -28,7 +28,8 @@ from mqtt_broker import Broker, Received, Subscriber, mosquitto
 
 from occupancy_service.capture import Frame
 from occupancy_service.l0 import L0
-from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings, L1Subscription
+from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Settings
+from occupancy_service.l1_changes import L1Change, L1Subscription
 from occupancy_service.live_check import check
 from occupancy_service.profile import ProfileError
 from occupancy_service.publisher import Publisher, PublisherSettings, paho_connect
