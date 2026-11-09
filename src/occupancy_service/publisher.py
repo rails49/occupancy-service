@@ -5,6 +5,7 @@ import math
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -49,26 +50,57 @@ class ResultSource(Protocol):
     def subscribe(self) -> L1Subscription: ...
 
 
+Will = tuple[str, bytes, int, bool]
+"""A last will: its topic, body, QoS and retain."""
+
+
+class Connection(Protocol):
+    """One connection to the broker, which keeps itself up and reconnects. Its client id, will and
+    log label are fixed when it is made."""
+
+    def publish(self, topic: str, body: bytes, qos: int, retain: bool) -> bool:
+        """False when it is down or the message is refused."""
+        ...
+
+    def take_fresh(self) -> bool:
+        """Whether it has just connected, so that it should be sent what it carries. Clears that."""
+        ...
+
+    def is_connected(self) -> bool: ...
+
+    def disconnect(self) -> None:
+        """Ends it cleanly, so the broker drops its will. ``join`` waits for it."""
+        ...
+
+    def abandon(self) -> None:
+        """Ends it with no DISCONNECT, so the broker sends its will, and sends nothing more."""
+        ...
+
+    def has_ended(self) -> bool:
+        """Whether it has ended, so that ``join`` returns at once."""
+        ...
+
+    def join(self) -> None: ...
+
+
+Connect = Callable[[str, str, Will | None], Connection]
+"""Makes a connection from its client id, log label and will."""
+
+
 class _Connection:
     """One paho client, which paho's thread keeps up and reconnects. Each new connection drops
-    what paho still holds from the one before, then sets ``fresh``, for the publisher's thread to
-    take and send what this connection carries."""
+    what paho still holds from the one before, then is fresh, for the publisher's thread to take
+    and send what this connection carries."""
 
     def __init__(
-        self,
-        settings: PublisherSettings,
-        client_id: str,
-        label: str,
-        will: tuple[str, bytes, int, bool] | None = None,
-        archive_id: str | None = None,
+        self, settings: PublisherSettings, client_id: str, label: str, will: Will | None = None
     ) -> None:
         self.label = label
-        self.archive_id = archive_id
-        self.fresh = threading.Event()
+        self._fresh = threading.Event()
         self._settings = settings
         self._closing = False
         self._log_connect_failure = True  # Once for each time the broker is out of reach.
-        self.client = client = paho.Client(
+        self._client = client = paho.Client(
             CallbackAPIVersion.VERSION2, client_id=client_id, protocol=paho.MQTTv311
         )
         client.on_connect = self._on_connect
@@ -83,16 +115,30 @@ class _Connection:
         # paho 2.2 has no public handle on its thread: ``_thread`` is it, until it ends.
         self._thread: threading.Thread | None = client._thread
 
+    def publish(self, topic: str, body: bytes, qos: int, retain: bool) -> bool:
+        """What paho holds unacknowledged when the connection ends, the next one drops: it would
+        go out stale after the reconnect."""
+        if not self._client.is_connected():
+            return False
+        sent = self._client.publish(topic, body, qos, retain)
+        return sent.rc == MQTTErrorCode.MQTT_ERR_SUCCESS
+
+    def take_fresh(self) -> bool:
+        if not self._fresh.is_set():
+            return False
+        self._fresh.clear()
+        return True
+
     def is_connected(self) -> bool:
-        return self.client.is_connected()
+        return self._client.is_connected()
 
     def disconnect(self) -> None:
         """Ends the connection cleanly, so the broker drops its will. ``join`` waits for it."""
         self._closing = True
-        self.client.disconnect()
+        self._client.disconnect()
 
     def join(self) -> None:
-        self.client.loop_stop()
+        self._client.loop_stop()
 
     def has_ended(self) -> bool:
         """Whether paho's thread has ended, so that ``join`` returns at once. After
@@ -104,9 +150,9 @@ class _Connection:
         """Ends the connection with no DISCONNECT, so the broker sends its will, and sends
         nothing more: what paho still holds is dropped, as paho's thread would wait for it."""
         self._closing = True
-        self.client.drop_out_messages()
-        self.client.loop_stop()
-        sock = self.client.socket()
+        self._client.drop_out_messages()
+        self._client.loop_stop()
+        sock = self._client.socket()
         if sock is not None:
             sock.close()
 
@@ -125,9 +171,9 @@ class _Connection:
         _log.info("connected %s to the broker at %s:%s", self.label, settings.host, settings.port)
         self._log_connect_failure = True
         # A QoS 1 or 2 message the broker never acknowledged, which paho would send again after
-        # this callback returns. It is stale by now: ``fresh`` sends what is current instead.
+        # this callback returns. It is stale by now: being fresh sends what is current instead.
         client.drop_out_messages()
-        self.fresh.set()
+        self._fresh.set()
 
     def _on_connect_fail(self, client: paho.Client, userdata: Any) -> None:
         if self._log_connect_failure:
@@ -152,22 +198,24 @@ class _Connection:
             _log.warning("lost the broker on %s: %s", self.label, reason_code)
 
 
-class _SensorConnection(_Connection):
-    """The connection that carries one sensor on one ``per_sensor`` profile."""
+def paho_connect(settings: PublisherSettings) -> Connect:
+    """Connections over paho to the broker that ``settings`` name."""
 
-    def __init__(
-        self,
-        settings: PublisherSettings,
-        client_id: str,
-        will: tuple[str, bytes, int, bool] | None,
-        archive_id: str | None,
-        profile: Profile,
-        sensor: str,
-    ) -> None:
-        label = f"for sensor {sensor!r} on profile {profile.name}"
-        super().__init__(settings, client_id, label, will, archive_id)
-        self.profile = profile
-        self.sensor = sensor
+    def connect(client_id: str, label: str, will: Will | None) -> Connection:
+        return _Connection(settings, client_id, label, will)
+
+    return connect
+
+
+@dataclass(frozen=True)
+class _PerSensor:
+    """The connection that carries one sensor on one ``per_sensor`` profile, for one archive
+    ``id``."""
+
+    profile: Profile
+    sensor: str
+    archive_id: str | None
+    connection: Connection
 
 
 class Publisher:
@@ -180,9 +228,12 @@ class Publisher:
     so a reload needs no restart and nothing it sends is older than ``latest()``.
     """
 
-    def __init__(self, settings: PublisherSettings, source: ResultSource) -> None:
-        """Raises ``ProfileError`` for an active profile that is wrong."""
-        self._settings = settings
+    def __init__(
+        self, settings: PublisherSettings, source: ResultSource, connect: Connect | None = None
+    ) -> None:
+        """``connect`` stands in for paho, to the broker the settings name. Raises
+        ``ProfileError`` for an active profile that is wrong."""
+        self._connect = paho_connect(settings) if connect is None else connect
         self._source = source
         profiles = [load_profile(name) for name in settings.profiles]
         names = [profile.name for profile in profiles]
@@ -202,10 +253,9 @@ class Publisher:
         ]
         self._l0_seen: L0 | None = None  # The newest L0 this has sent, or passed over.
         self._stopping = threading.Event()
-        self._shared: _Connection | None = None
-        # By profile name and sensor.
-        self._per_sensor: dict[tuple[str, str], _SensorConnection] = {}
-        self._closed: list[_Connection] = []  # Disconnected, and not yet joined.
+        self._shared: Connection | None = None
+        self._per_sensor: dict[tuple[str, str], _PerSensor] = {}  # By profile name and sensor.
+        self._closed: list[Connection] = []  # Disconnected, and not yet joined.
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -236,7 +286,7 @@ class Publisher:
             subscription = self._source.subscribe()
             if self._shared_profiles:
                 client_id = f"occupancy-service-{secrets.token_hex(4)}"
-                self._shared = _Connection(self._settings, client_id, "shared")
+                self._shared = self._connect(client_id, "shared", None)
             while not self._stopping.is_set():
                 self._serve_once(subscription)
             newest = self._source.latest()
@@ -255,9 +305,9 @@ class Publisher:
             if subscription is not None:
                 subscription.close()
 
-    def _connections(self) -> list[_Connection]:
+    def _connections(self) -> list[Connection]:
         """Every connection made, up or not, including those disconnected and not yet joined."""
-        connections = [*self._per_sensor.values(), *self._closed]
+        connections = [*(each.connection for each in self._per_sensor.values()), *self._closed]
         if self._shared is not None:
             connections.append(self._shared)
         return connections
@@ -293,18 +343,18 @@ class Publisher:
             for sensor in result.l1:
                 if active.carries(sensor, result.archive_id):
                     wanted[(active.profile.name, sensor)] = active
-        for key, connection in list(self._per_sensor.items()):
-            if key not in wanted or connection.archive_id != result.archive_id:
-                profile, sensor = connection.profile, connection.sensor
-                topic = profile.topic_for(sensor, connection.archive_id)
+        for key, each in list(self._per_sensor.items()):
+            if key not in wanted or each.archive_id != result.archive_id:
+                profile, sensor = each.profile, each.sensor
+                topic = profile.topic_for(sensor, each.archive_id)
                 if key not in wanted or profile.topic_for(sensor, result.archive_id) != topic:
-                    self._active[profile.name].removed(sensor, connection.archive_id)
-                connection.disconnect()
-                self._closed.append(connection)
+                    self._active[profile.name].removed(sensor, each.archive_id)
+                each.connection.disconnect()
+                self._closed.append(each.connection)
                 del self._per_sensor[key]
         for key, active in wanted.items():
             if key not in self._per_sensor:
-                self._per_sensor[key] = self._connect(active.profile, key[1], result.archive_id)
+                self._per_sensor[key] = self._open(active.profile, key[1], result.archive_id)
 
     def _join_ended(self) -> None:
         """Joins and drops each closed connection whose thread has ended, and waits on none."""
@@ -313,28 +363,25 @@ class Publisher:
             connection.join()
             self._closed.remove(connection)
 
-    def _connect(self, profile: Profile, sensor: str, archive_id: str | None) -> _SensorConnection:
+    def _open(self, profile: Profile, sensor: str, archive_id: str | None) -> _PerSensor:
         topic = profile.topic_for(sensor, archive_id)
         will = profile.will_for(sensor)
         last_will = None
         if topic is not None and will is not None:
             last_will = (topic, encode(will), profile.qos, profile.retain)
         parts = ["occupancy-service", profile.name, *([archive_id] if archive_id else []), sensor]
-        return _SensorConnection(
-            self._settings, "-".join(parts), last_will, archive_id, profile, sensor
-        )
+        label = f"for sensor {sensor!r} on profile {profile.name}"
+        connection = self._connect("-".join(parts), label, last_will)
+        return _PerSensor(profile, sensor, archive_id, connection)
 
     def _send_on_fresh(self, result: L1Result) -> None:
         """What each connection carries, when it has just connected."""
-        if self._shared is not None and self._shared.fresh.is_set():
-            self._shared.fresh.clear()
+        if self._shared is not None and self._shared.take_fresh():
             for active in self._shared_profiles:
                 active.fresh(result)
-        for connection in self._per_sensor.values():
-            sensor = connection.sensor
-            if connection.fresh.is_set() and sensor in result.l1:
-                connection.fresh.clear()
-                self._active[connection.profile.name].fresh(result, sensor)
+        for each in self._per_sensor.values():
+            if each.sensor in result.l1 and each.connection.take_fresh():
+                self._active[each.profile.name].fresh(result, each.sensor)
 
     def _send_l0(self, result: L1Result) -> None:
         """A new L0, once, on each profile with an ``l0_topic``, not retained. Nothing goes out
@@ -349,32 +396,26 @@ class Publisher:
         for profile in self._l0_profiles:
             topic = profile.l0_topic_for(result.archive_id)
             if topic is not None:
-                self._shared.client.publish(topic, body, profile.qos, retain=False)
+                self._shared.publish(topic, body, profile.qos, retain=False)
 
     def _sender(self, profile: Profile) -> Send:
         """The ``send`` of ``profile``'s ``ActiveProfile``: on the connection that carries the
-        sensor, and only while it is up. What paho holds unacknowledged when a connection ends,
-        the next one drops: it would go out stale after the reconnect."""
+        sensor, and only while it is up. When it is not, each new connection sends what it
+        carries."""
 
         def send(
             sensor: str, archive_id: str | None, topic: str, body: bytes, qos: int, retain: bool
         ) -> bool:
             connection = self._connection(profile, sensor, archive_id)
-            if connection is None or not connection.is_connected():
-                return False  # Each new connection sends what it carries.
-            sent = connection.client.publish(topic, body, qos, retain)
-            # Else the connection has just ended, and the next one sends what it carries.
-            return sent.rc == MQTTErrorCode.MQTT_ERR_SUCCESS
+            return connection is not None and connection.publish(topic, body, qos, retain)
 
         return send
 
     def _connection(
         self, profile: Profile, sensor: str, archive_id: str | None
-    ) -> _Connection | None:
+    ) -> Connection | None:
         """The connection that carries ``sensor`` on ``profile``, if it has one."""
         if profile.connection == "shared":
             return self._shared
-        connection = self._per_sensor.get((profile.name, sensor))
-        return (
-            connection if connection is not None and connection.archive_id == archive_id else None
-        )
+        each = self._per_sensor.get((profile.name, sensor))
+        return each.connection if each is not None and each.archive_id == archive_id else None
