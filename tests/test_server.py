@@ -5,6 +5,7 @@ import http.client
 import io
 import json
 import socket
+import struct
 import sys
 import threading
 import time
@@ -252,6 +253,23 @@ def test_anything_else_is_a_404(any_archive: Path, path: str) -> None:
     with live(any_archive) as service:
         response = service.get(path)
         assert response.status == 404, response.read()
+
+
+def test_a_client_that_resets_an_idle_connection_prints_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def requests() -> set[threading.Thread]:
+        return {t for t in threading.enumerate() if "process_request_thread" in t.name}
+
+    before = requests()
+    with live(folder_archive(tmp_path)) as service:
+        client = socket.create_connection(("127.0.0.1", service.server.port), timeout=10)
+        client.sendall(b"GET /live/archive/manifest.json HTTP/1.1\r\nHost: x\r\n\r\n")
+        assert client.recv(12) == b"HTTP/1.1 200"
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        client.close()  # A reset, not a close.
+        wait_for(lambda: True if not requests() - before else None)
+    assert capsys.readouterr().err == ""
 
 
 def test_no_access_control_headers_and_an_origin_changes_nothing(tmp_path: Path) -> None:

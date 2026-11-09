@@ -145,6 +145,8 @@ A frame not at `camera.resolution` is left out of `latest`, because the contract
 
 An `events` client that takes over 2 s over one write, or has over 1000 changes waiting, is dropped, and gets the full state when it reconnects. Each client waits on its own thread, so it holds up neither the others nor the scoring loop.
 
+A client that closes or resets a connection ends that connection's thread, and nothing is printed.
+
 ## MQTT
 
 `occupancy_service.publisher` publishes L1 as its active profiles say, over `paho-mqtt`: one connection for every profile whose `connection` is `shared`, and [one per sensor](#one-connection-per-sensor) on each profile whose `connection` is `per_sensor`. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive of every connection (5 s), and the timeout of connecting (2 s). A broker gives up on a silent connection after one and a half keepalives, and then sends its [last will](#one-connection-per-sensor), so a will goes out within about 8 s of a host or a network failing. A killed process closes its connections, and the broker sends each will at once. The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them.
