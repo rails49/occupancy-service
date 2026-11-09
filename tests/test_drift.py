@@ -92,7 +92,9 @@ def _archive(tmp_path: Path, **replaced: Any) -> Path:
 def _loop(
     archive: Path, source: FakeSource, checks: FakeChecks | None = None, **settings: Any
 ) -> L1Loop:
-    settings = {"drift_every": 0.01, **settings}
+    # Each test shows one frame, so it scores once. A stall only after ``wait_for``'s timeout, so
+    # a slow machine never sees ``scoring stalled`` where a test reads drift or L1.
+    settings = {"drift_every": 0.01, "stalled_after": 60.0, **settings}
     scorer = FakeScorer(SCORES)
     if checks is None:
         return L1Loop(L1Settings(archive, **settings), source, scorer)
