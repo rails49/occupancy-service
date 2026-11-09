@@ -191,8 +191,8 @@ class Publisher:
     thread does the sending, and opens and closes the connections of sensors a reload adds and
     removes.
 
-    It keeps no result: each message comes from ``latest()``, or from a change it has just been
-    told of, so a reload needs no restart and a repeat is as fresh as ``latest()``. The one thing
+    It keeps no result: each message comes from ``latest()``, a change only saying when to send,
+    so a reload needs no restart and nothing it sends is older than ``latest()``. The one thing
     it keeps, for a profile with a hold, is what that profile last reported.
     """
 
@@ -352,10 +352,18 @@ class Publisher:
                 self._shared.client.publish(topic, body, profile.qos, retain=False)
 
     def _send_change(self, change: L1Change) -> None:
+        """Sends the sensor's entry in the newest result, not the change's: a later change may
+        already have replaced it. Each hold is told the change's entry first, as a break in
+        ``clear`` restarts a hold even when ``latest()`` has already left it."""
         result = self._source.latest()
-        if change.sensor in result.l1:  # Otherwise a reload has just removed it.
-            for profile in self._profiles:
-                self._report(profile, change.sensor, change.entry, result)
+        entry = result.l1.get(change.sensor)
+        if entry is None:
+            return  # A reload has just removed it.
+        for profile in self._profiles:
+            hold = self._holds.get(profile.name)
+            if hold is not None:
+                hold.report(change.sensor, change.entry, _captured_at(result))
+            self._report(profile, change.sensor, entry, result)
 
     def _end_holds(self, subscription: L1Subscription) -> None:
         """Sends ``clear`` for each sensor whose hold the newest result ends, where it can be sent:

@@ -277,6 +277,22 @@ def test_a_new_reason_is_a_change(broker: Broker, tmp_path: Path) -> None:
         subscriber.wait_for(lambda m: payload(m).get("reason") == "scoring stalled")
 
 
+def test_a_change_sends_what_latest_says_and_not_an_entry_it_has_left(
+    broker: Broker, tmp_path: Path
+) -> None:
+    """Two changes queued between passes, occupied then clear, with ``latest()`` already clear."""
+    path = profile_file(tmp_path, repeat=60)
+    source = FakeResults({"a": CLEAR})
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        subscriber.wait_for(lambda m: m.topic == "own/a")
+        (subscription,) = source.subscriptions
+        subscription.queue.put(L1Change("a", OCCUPIED))
+        subscription.queue.put(L1Change("a", CLEAR))
+        wait_for(lambda: len(states(subscriber)) >= 3)  # The first, and one for each change.
+        time.sleep(0.2)
+        assert states(subscriber) == ["clear", "clear", "clear"]
+
+
 def test_every_sensor_is_unknown_at_startup_on_the_real_loop(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -745,6 +761,31 @@ def test_a_break_in_clear_while_the_broker_is_gone_restarts_the_hold(
             assert set(states(after)) == {"occupied"}
             source.frame = Frame(b"", 4, first + timedelta(seconds=61))
             after.wait_for(lambda m: payload(m)["state"] == "clear")
+
+
+def test_an_occupied_change_already_gone_from_latest_still_restarts_the_hold(
+    broker: Broker, tmp_path: Path
+) -> None:
+    """On capture times the test sets: ``latest()`` never says occupied after the first clear."""
+    path = profile_file(tmp_path, repeat=60, clear_hold_s=30)
+    source = FakeResults({"a": OCCUPIED})
+    first = datetime(2026, 11, 5, 12, tzinfo=UTC)
+    source.frame = Frame(b"", 1, first)
+    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
+        subscriber.wait_for(lambda m: m.topic == "own/a")
+        source.show({"a": CLEAR})
+        time.sleep(0.1)
+        source.frame = Frame(b"", 2, first + timedelta(seconds=1))
+        (subscription,) = source.subscriptions
+        subscription.queue.put(L1Change("a", OCCUPIED))
+        subscription.queue.put(L1Change("a", CLEAR))
+        time.sleep(0.15)
+        # The hold that began before the break would have ended by now.
+        source.frame = Frame(b"", 3, first + timedelta(seconds=30.5))
+        time.sleep(0.2)
+        assert set(states(subscriber)) == {"occupied"}
+        source.frame = Frame(b"", 4, first + timedelta(seconds=31))
+        subscriber.wait_for(lambda m: payload(m)["state"] == "clear")
 
 
 def test_two_profiles_at_once_hold_apart_and_last_messages_show_what_each_sent(
