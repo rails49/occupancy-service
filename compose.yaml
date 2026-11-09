@@ -15,8 +15,7 @@ services:
     group_add:
       - "${VIDEO_GID:?}"
       - "${RENDER_GID:?}"
-    # The host's /dev, so a replugged camera appears with no restart. 81 is
-    # video4linux, 226 is the GPU.
+    # 81 is video4linux, 226 is the GPU.
     device_cgroup_rules:
       - "c 81:* rmw"
       - "c 226:* rmw"

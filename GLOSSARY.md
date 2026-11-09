@@ -50,3 +50,9 @@ A TOML file that says how L1 goes out over MQTT, and L0 where it has an L0 topic
 
 **Drift**:
 `occupancy`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/occupancy/blob/main/GLOSSARY.md).
+
+**Box**:
+The organisation's word, owned by its [GLOSSARY.md](https://github.com/rails49/.github/blob/main/GLOSSARY.md).
+
+**Door**:
+The organisation's word, owned by its [GLOSSARY.md](https://github.com/rails49/.github/blob/main/GLOSSARY.md).

@@ -74,6 +74,14 @@ def test_a_replugged_camera_appears_with_no_restart(project: dict[str, Any]) -> 
     assert [(v["type"], v["source"]) for v in dev] == [("bind", "/dev")]
 
 
+def test_the_service_reaches_the_gpu_and_the_camera_as_the_person(
+    project: dict[str, Any],
+) -> None:
+    service = project["services"]["service"]
+    assert "c 226:* rmw" in service["device_cgroup_rules"]
+    assert service["group_add"] == ["44", "992"]
+
+
 def test_the_service_restarts_unless_stopped(project: dict[str, Any]) -> None:
     assert project["services"]["service"]["restart"] == "unless-stopped"
 
@@ -102,7 +110,7 @@ def test_the_service_image_has_no_detector_unless_asked(project: dict[str, Any])
     assert args == {"DETECTOR_VERSION": "0.0.2"}
 
 
-@pytest.mark.parametrize("missing", ["OCCUPANCY_ARCHIVE", "OCCUPANCY_CAMERA", "BOX_DOMAIN"])
+@pytest.mark.parametrize("missing", list(SETTINGS))
 def test_a_setting_with_no_default_is_named_when_missing(missing: str) -> None:
     done = config({k: v for k, v in SETTINGS.items() if k != missing})
     assert done.returncode != 0
