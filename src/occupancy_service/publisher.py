@@ -147,6 +147,16 @@ class _Connection:
     def join(self) -> None:
         self.client.loop_stop()
 
+    def abandon(self) -> None:
+        """Ends the connection with no DISCONNECT, so the broker sends its will, and sends
+        nothing more: what paho still holds is dropped, as paho's thread would wait for it."""
+        self._closing = True
+        self.client.drop_out_messages()
+        self.client.loop_stop()
+        sock = self.client.socket()
+        if sock is not None:
+            sock.close()
+
     def _on_connect(
         self,
         client: paho.Client,
@@ -246,25 +256,38 @@ class Publisher:
             return {sensor: dict(by_profile) for sensor, by_profile in self._last.items()}
 
     def _run(self) -> None:
-        subscription = self._source.subscribe()
-        if self._shared_profiles:
-            client_id = f"occupancy-service-{secrets.token_hex(4)}"
-            self._shared = _Connection(self._settings, client_id, "shared")
-        now = time.monotonic()
-        due = {p.name: now + p.repeat for p in self._profiles if p.repeat > 0}
+        """Serves until ``stop()``. An error here ends publishing: it is logged, and every
+        connection ends with no DISCONNECT, so that each will goes out. Nothing restarts it."""
+        subscription: L1Subscription | None = None
         try:
+            subscription = self._source.subscribe()
+            if self._shared_profiles:
+                client_id = f"occupancy-service-{secrets.token_hex(4)}"
+                self._shared = _Connection(self._settings, client_id, "shared")
+            now = time.monotonic()
+            due = {p.name: now + p.repeat for p in self._profiles if p.repeat > 0}
             while not self._stopping.is_set():
                 self._serve_once(subscription, due)
             self._send_all(self._profiles, stopping=True)
-            connections = [*self._per_sensor.values(), *self._closed]
-            if self._shared is not None:
-                connections.append(self._shared)
+            connections = self._connections()
             for connection in connections:
                 connection.disconnect()
             for connection in connections:  # Apart, so that each waits on its own at once.
                 connection.join()
+        except Exception:
+            _log.exception("publishing has stopped, and every connection to the broker is dropped")
+            for connection in self._connections():
+                connection.abandon()
         finally:
-            subscription.close()
+            if subscription is not None:
+                subscription.close()
+
+    def _connections(self) -> list[_Connection]:
+        """Every connection made, up or not, including those disconnected and not yet joined."""
+        connections = [*self._per_sensor.values(), *self._closed]
+        if self._shared is not None:
+            connections.append(self._shared)
+        return connections
 
     def _serve_once(self, subscription: L1Subscription, due: dict[str, float]) -> None:
         """Every sensor on each new connection, each change as it comes, and every sensor on each
