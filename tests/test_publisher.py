@@ -1,9 +1,9 @@
-"""The publisher against a real ``mosquitto``, on a fake result source and on the real L1 loop."""
+"""The publisher on the wire, against a real ``mosquitto``, on a fake result source and on the
+real L1 loop; and what it decides, on the test connection."""
 
 import json
 import logging
 import re
-import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fake_connection import FakeConnect, FakeConnection, Published
 from fake_l1 import (
     FakeChecks,
     FakeDetector,
@@ -23,14 +24,14 @@ from fake_l1 import (
     wait_for,
     write_archive,
 )
-from mqtt_broker import Broker, Received, Subscriber, free_port, mosquitto
+from mqtt_broker import Broker, Received, Subscriber, mosquitto
 
 from occupancy_service.capture import Frame
 from occupancy_service.l0 import L0
 from occupancy_service.l1 import L1Change, L1Entry, L1Loop, L1Result, L1Settings, L1Subscription
 from occupancy_service.live_check import check
 from occupancy_service.profile import ProfileError
-from occupancy_service.publisher import Publisher, PublisherSettings, _Connection
+from occupancy_service.publisher import Publisher, PublisherSettings, paho_connect
 from occupancy_service.server import LiveServer, ServerSettings
 
 CLEAR = L1Entry("clear")
@@ -280,26 +281,6 @@ def test_every_sensor_is_unknown_at_startup_on_the_real_loop(
         assert payload(subscriber.on(OWN + id)[0]) == {"state": "unknown", "reason": "no frames"}
 
 
-def test_a_clean_stop_sends_unknown_for_every_sensor_then_nothing(broker: Broker) -> None:
-    source = FakeResults({"a": OCCUPIED, "b": CLEAR})
-    settings = settings_for(broker, "occupancy", "control")
-    with subscribed(broker) as subscriber:
-        with publishing(source, settings):
-            wait_for(lambda: subscriber.on(OWN + "a") and subscriber.on(OWN + "b"))
-        stopped = {"state": "unknown", "reason": "service stopped"}
-        wait_for(lambda: payload(subscriber.on(OWN + "a")[-1]) == stopped)
-        wait_for(lambda: payload(subscriber.on(OWN + "b")[-1]) == stopped)
-        wait_for(lambda: len(subscriber.on(CONTROL)) >= 4)
-        last = {payload(m)["addr"]: payload(m) for m in subscriber.on(CONTROL)}
-        assert last["a"] == {"addr": "a", "occupancy": "unknown", "reason": "service stopped"}
-        assert last["b"] == {"addr": "b", "occupancy": "unknown", "reason": "service stopped"}
-        count = len(subscriber.messages)
-        time.sleep(1.2)
-        assert len(subscriber.messages) == count
-    # A broker logs this only for a client that sent DISCONNECT, and otherwise that it "closed".
-    assert re.search(r"Client occupancy-service-\w+ disconnected\.", broker.log.read_text())
-
-
 def test_scoring_stalled_goes_out_when_results_stop_and_the_publisher_keeps_running(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -405,60 +386,6 @@ def test_with_no_archive_id_only_a_topic_that_needs_none_reports(broker: Broker)
         "occupancy": "unknown",
         "reason": "archive has no id",
     }
-
-
-def test_a_new_set_of_sensors_and_a_new_id_are_reported_and_a_removed_sensor_is_not(
-    broker: Broker, tmp_path: Path
-) -> None:
-    fast = profile_file(tmp_path, topic="own/{archive_id}/{sensor}")
-    source = FakeResults({"kept": CLEAR, "removed": CLEAR})
-    settings = settings_for(broker, fast)
-    with subscribed(broker) as subscriber, publishing(source, settings) as publisher:
-        wait_for(lambda: subscriber.on("own/archive-1/kept"))
-        wait_for(lambda: subscriber.on("own/archive-1/removed"))
-        wait_for(lambda: "removed" in publisher.last_messages())
-        source.show({"kept": CLEAR, "added": OCCUPIED}, archive_id="archive-2")
-        wait_for(lambda: subscriber.on("own/archive-2/kept"))
-        wait_for(lambda: subscriber.on("own/archive-2/added"))
-        wait_for(lambda: "removed" not in publisher.last_messages())
-        changed_at = time.monotonic()
-        time.sleep(0.3)
-    while_running = [
-        message
-        for message in subscriber.messages
-        if changed_at <= message.at and "service stopped" not in message.payload.decode()
-    ]
-    assert {message.topic for message in while_running} == {
-        "own/archive-2/kept",
-        "own/archive-2/added",
-    }
-    assert {message.topic for message in subscriber.messages} == {
-        "own/archive-1/kept",
-        "own/archive-1/removed",
-        "own/archive-2/kept",
-        "own/archive-2/added",
-    }
-
-
-def test_a_per_sensor_topic_with_the_archive_id_says_removed_on_the_old_one_when_it_changes(
-    broker: Broker, tmp_path: Path
-) -> None:
-    path = profile_file(tmp_path, topic="own/{archive_id}/{sensor}", connection="per_sensor")
-    source = FakeResults({"a": CLEAR})
-    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
-        wait_for(lambda: subscriber.on("own/archive-1/a"))
-        changed_at = time.monotonic()
-        source.show({"a": CLEAR}, archive_id="archive-2")
-        removed = subscriber.wait_for(
-            lambda m: m.topic == "own/archive-1/a" and payload(m).get("state") == "unknown"
-        )
-        assert payload(removed) == {"state": "unknown", "reason": "sensor removed"}
-        assert removed.at > changed_at
-        assert payload(subscriber.wait_for(lambda m: m.topic == "own/archive-2/a")) == {
-            "state": "clear"
-        }
-        wait_for(lambda: disconnected_clients(broker) == ["occupancy-service-fast-archive-1-a"])
-        assert "occupancy-service-fast-archive-2-a" in connected_clients(broker)
 
 
 @pytest.mark.parametrize(
@@ -700,61 +627,6 @@ def test_jmri_corrects_a_wrong_retained_value_within_about_1_s(broker: Broker) -
         assert retained(broker, [JMRI + "a"])[JMRI + "a"].payload == b"ACTIVE"
 
 
-def test_jmri_connects_a_sensor_a_reload_adds_and_disconnects_one_it_removes(
-    broker: Broker,
-) -> None:
-    source = FakeResults({"kept": CLEAR, "removed": CLEAR})
-    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "jmri")):
-        wait_for(lambda: subscriber.on(JMRI + "kept") and subscriber.on(JMRI + "removed"))
-        source.show({"kept": CLEAR, "added": CLEAR})
-        subscriber.wait_for(lambda m: m.topic == JMRI + "added" and m.payload == b"INACTIVE")
-        subscriber.wait_for(lambda m: m.topic == JMRI + "removed" and m.payload == b"ACTIVE")
-        wait_for(lambda: "occupancy-service-jmri-archive-1-removed" in disconnected_clients(broker))
-        removed_at = time.monotonic()
-        time.sleep(1.2)  # Past a repeat.
-        assert not [m for m in subscriber.on(JMRI + "removed") if m.at > removed_at]
-        assert retained(broker, [JMRI + "removed"])[JMRI + "removed"].payload == b"ACTIVE"
-        assert disconnected_clients(broker) == ["occupancy-service-jmri-archive-1-removed"]
-        assert "occupancy-service-jmri-archive-1-added" in connected_clients(broker)
-
-
-def test_jmri_sends_a_clear_sensor_no_active_when_the_archive_id_changes(broker: Broker) -> None:
-    source = FakeResults({"clear": CLEAR, "busy": OCCUPIED})
-    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "jmri")):
-        wait_for(lambda: subscriber.on(JMRI + "clear") and subscriber.on(JMRI + "busy"))
-        changed_at = time.monotonic()
-        source.show({"clear": CLEAR, "busy": OCCUPIED}, archive_id="archive-2")
-        wait_for(lambda: len(disconnected_clients(broker)) == 2)
-        subscriber.wait_for(lambda m: m.topic == JMRI + "clear" and m.at > changed_at)
-        time.sleep(0.5)
-        after = [m.payload for m in subscriber.on(JMRI + "clear") if m.at > changed_at]
-        assert after and set(after) == {b"INACTIVE"}
-        assert retained(broker, [JMRI + "clear"])[JMRI + "clear"].payload == b"INACTIVE"
-        assert sorted(disconnected_clients(broker)) == [
-            "occupancy-service-jmri-archive-1-busy",
-            "occupancy-service-jmri-archive-1-clear",
-        ]
-        new = ["occupancy-service-jmri-archive-2-busy", "occupancy-service-jmri-archive-2-clear"]
-        assert set(new) <= set(connected_clients(broker))
-
-
-def test_jmri_leaves_active_retained_on_a_clean_stop(broker: Broker) -> None:
-    sensors = {"a": CLEAR, "b": CLEAR}
-    topics = [JMRI + id for id in sensors]
-    with subscribed(broker) as subscriber:
-        with publishing(FakeResults(sensors), settings_for(broker, "jmri")):
-            wait_for(lambda: all(subscriber.on(topic) for topic in topics))
-        assert {m.payload for m in subscriber.messages if m.topic in topics} == {
-            b"INACTIVE",
-            b"ACTIVE",
-        }
-    assert {message.payload for message in retained(broker, topics).values()} == {b"ACTIVE"}
-    assert sorted(disconnected_clients(broker)) == [
-        "occupancy-service-jmri-archive-1-a",
-        "occupancy-service-jmri-archive-1-b",
-    ]
-
-
 def test_jmri_gives_a_restarted_broker_every_sensor_again(broker: Broker) -> None:
     sensors = jmri_sensors(6)
     topics = [JMRI + id for id in sensors]
@@ -765,26 +637,6 @@ def test_jmri_gives_a_restarted_broker_every_sensor_again(broker: Broker) -> Non
         after = retained(broker, topics)
     for id, entry in sensors.items():
         assert after[JMRI + id].payload == jmri_payload(entry)
-
-
-def test_jmri_with_no_archive_id_reports_every_sensor_active(broker: Broker) -> None:
-    no_id = L1Entry("unknown", reason="archive has no id")
-    source = FakeResults({"a": no_id, "b": no_id}, archive_id=None)
-    with publishing(source, settings_for(broker, "jmri")):
-        late = retained(broker, [JMRI + "a", JMRI + "b"])
-    assert {message.payload for message in late.values()} == {b"ACTIVE"}
-    assert sorted(connected_clients(broker)) == [
-        "occupancy-service-jmri-a",
-        "occupancy-service-jmri-b",
-    ]
-
-
-def test_shared_profiles_open_one_connection_between_them(broker: Broker) -> None:
-    source = FakeResults(jmri_sensors(6))
-    settings = settings_for(broker, "occupancy", "control")
-    with subscribed(broker) as subscriber, publishing(source, settings):
-        wait_for(lambda: len(subscriber.on(CONTROL)) >= 6 and subscriber.on(OWN + "s05"))
-        assert len(connected_clients(broker)) == 1
 
 
 def test_a_stop_with_no_broker_returns_with_a_connection_per_sensor(broker: Broker) -> None:
@@ -907,68 +759,6 @@ def test_rocrail_gives_a_restarted_broker_every_sensor_again(broker: Broker) -> 
             )
 
 
-def test_rocrail_connects_a_sensor_a_reload_adds_and_disconnects_one_it_removes(
-    broker: Broker,
-) -> None:
-    source = FakeResults({"kept": CLEAR, "removed": CLEAR, "busy": OCCUPIED})
-    with (
-        subscribed(broker, qos=1) as subscriber,
-        publishing(source, settings_for(broker, "rocrail")),
-    ):
-        wait_for(lambda: len(subscriber.on(ROCRAIL)) == 3)
-        source.show({"kept": CLEAR, "added": CLEAR})
-        subscriber.wait_for(lambda m: m.payload == fb("added", False))
-        subscriber.wait_for(lambda m: m.payload == fb("removed", True))
-        prefix = "occupancy-service-rocrail-archive-1-"
-        wait_for(lambda: len(disconnected_clients(broker)) == 2)
-        assert sorted(disconnected_clients(broker)) == [prefix + "busy", prefix + "removed"]
-        assert prefix + "added" in connected_clients(broker)
-        time.sleep(0.5)
-        # "busy" was already true, so it gets nothing more: Rocrail would take it as a new event.
-        assert [m.payload for m in on_rocrail(subscriber, "busy")] == [fb("busy", True)]
-        assert [m.payload for m in on_rocrail(subscriber, "removed")] == [
-            fb("removed", False),
-            fb("removed", True),
-        ]
-
-
-def test_rocrail_sends_a_clear_sensor_no_true_when_the_archive_id_changes(
-    broker: Broker,
-) -> None:
-    source = FakeResults({"clear": CLEAR, "busy": OCCUPIED})
-    with (
-        subscribed(broker, qos=1) as subscriber,
-        publishing(source, settings_for(broker, "rocrail")),
-    ):
-        wait_for(lambda: len(subscriber.on(ROCRAIL)) == 2)
-        changed_at = time.monotonic()
-        source.show({"clear": CLEAR, "busy": OCCUPIED}, archive_id="archive-2")
-        old = "occupancy-service-rocrail-archive-1-"
-        wait_for(lambda: sorted(disconnected_clients(broker)) == [old + "busy", old + "clear"])
-        new = "occupancy-service-rocrail-archive-2-"
-        wait_for(lambda: {new + "busy", new + "clear"} <= set(connected_clients(broker)))
-        subscriber.wait_for(lambda m: m.payload == fb("clear", False) and m.at > changed_at)
-        time.sleep(0.5)
-        after = [m.payload for m in on_rocrail(subscriber, "clear") if m.at > changed_at]
-        assert after == [fb("clear", False)]
-        assert fb("clear", True) not in [m.payload for m in on_rocrail(subscriber, "clear")]
-
-
-def test_rocrail_with_no_archive_id_reports_every_sensor_true(broker: Broker) -> None:
-    no_id = L1Entry("unknown", reason="archive has no id")
-    source = FakeResults({"a": no_id, "b": no_id}, archive_id=None)
-    with (
-        subscribed(broker, qos=1) as subscriber,
-        publishing(source, settings_for(broker, "rocrail")),
-    ):
-        wait_for(lambda: len(subscriber.on(ROCRAIL)) == 2)
-        assert sorted(m.payload for m in subscriber.on(ROCRAIL)) == [fb("a", True), fb("b", True)]
-    assert sorted(connected_clients(broker)) == [
-        "occupancy-service-rocrail-a",
-        "occupancy-service-rocrail-b",
-    ]
-
-
 def test_a_message_a_stalled_broker_never_acknowledged_does_not_reach_the_next_one(
     broker: Broker, tmp_path: Path
 ) -> None:
@@ -1022,27 +812,6 @@ def publisher_errors(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord
     ]
 
 
-def test_an_error_in_the_sending_loop_is_logged_and_ends_every_connection_with_its_will(
-    broker: Broker, caplog: pytest.LogCaptureFixture
-) -> None:
-    source = FailingResults({"a": CLEAR, "b": CLEAR})
-    settings = settings_for(broker, "jmri", "occupancy")
-    with subscribed(broker) as subscriber, publishing(source, settings):
-        wait_for(lambda: subscriber.on(JMRI + "a") and subscriber.on(JMRI + "b"))
-        wait_for(lambda: subscriber.on(OWN + "a") and subscriber.on(OWN + "b"))
-        source.failing = True
-        for id in "ab":  # Each sensor's will.
-            subscriber.wait_for(lambda m, id=id: m.topic == JMRI + id and m.payload == b"ACTIVE")
-        wait_for(lambda: len(closed_clients(broker)) == 3)
-        assert len(set(connected_clients(broker))) == 3
-        assert disconnected_clients(broker) == []
-        time.sleep(0.3)
-        assert len(publisher_errors(caplog)) == 1
-    (error,) = publisher_errors(caplog)
-    assert error.exc_info is not None and "the source broke" in str(error.exc_info[1])
-    assert {m.payload for m in retained(broker, [JMRI + "a", JMRI + "b"]).values()} == {b"ACTIVE"}
-
-
 def test_a_connection_that_cannot_be_made_is_logged_and_stop_returns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1051,29 +820,6 @@ def test_a_connection_that_cannot_be_made_is_logged_and_stop_returns(
     wait_for(lambda: publisher_errors(caplog))
     publisher.stop()
     assert len(publisher_errors(caplog)) == 1
-
-
-def jmri_threads() -> list[str]:
-    """The name of each paho thread running for a ``jmri`` sensor."""
-    prefix = "paho-mqtt-client-occupancy-service-jmri-"
-    return [t.name for t in threading.enumerate() if t.name.startswith(prefix)]
-
-
-def test_a_closed_connection_is_joined_and_dropped_while_serving(broker: Broker) -> None:
-    source = FakeResults({"kept": CLEAR})
-    with publishing(source, settings_for(broker, "jmri")) as publisher:
-        wait_for(lambda: "occupancy-service-jmri-archive-1-kept" in connected_clients(broker))
-        for round in range(1, 6):
-            # A sensor removed, and every connection on an archive ``id`` change.
-            source.show({"kept": CLEAR, f"r{round}": CLEAR}, archive_id=f"archive-{round % 2}")
-            ids = [
-                f"occupancy-service-jmri-archive-{round % 2}-{id}" for id in ("kept", f"r{round}")
-            ]
-            wait_for(lambda ids=ids: set(ids) <= set(connected_clients(broker)))
-        source.show({"kept": CLEAR}, archive_id="archive-1")
-        wait_for(lambda: "occupancy-service-jmri-archive-1-r5" in disconnected_clients(broker))
-        kept = ["paho-mqtt-client-occupancy-service-jmri-archive-1-kept"]
-        wait_for(lambda: not publisher._closed and jmri_threads() == kept)  # With no stop().
 
 
 class CountingResults(FakeResults):
@@ -1086,35 +832,6 @@ class CountingResults(FakeResults):
         return super().latest()
 
 
-def test_a_connection_that_never_reached_the_broker_is_dropped_once_its_thread_ends(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    holding, release = threading.Event(), threading.Event()
-    on_connect_fail = _Connection._on_connect_fail
-
-    def held(connection: _Connection, client: Any, userdata: Any) -> None:
-        """Keeps the removed sensor's paho thread in a failed connect until ``release``."""
-        on_connect_fail(connection, client, userdata)
-        if "'removed'" in connection.label:
-            holding.set()
-            release.wait(10)
-
-    monkeypatch.setattr(_Connection, "_on_connect_fail", held)
-    source = CountingResults({"kept": CLEAR, "removed": CLEAR})
-    nothing_listens = PublisherSettings(host="127.0.0.1", port=free_port(), profiles=("jmri",))
-    with publishing(source, nothing_listens) as publisher:
-        closed = publisher._closed
-        wait_for(holding.is_set)
-        source.show({"kept": CLEAR})
-        wait_for(lambda: closed)
-        calls = source.calls
-        wait_for(lambda: source.calls > calls + 10)  # Serving, with the thread not ended.
-        assert len(closed) == 1
-        release.set()
-        wait_for(lambda: not closed)
-        assert jmri_threads() == ["paho-mqtt-client-occupancy-service-jmri-archive-1-kept"]
-
-
 def test_no_python_file_under_src_names_rocrail() -> None:
     src = Path(__file__).parent.parent / "src"
     named = [path for path in src.rglob("*.py") if "rocrail" in path.read_text().lower()]
@@ -1124,57 +841,6 @@ def test_no_python_file_under_src_names_rocrail() -> None:
 
 def an_l0(*detections: Any) -> L0:
     return L0(Frame(b"", 7, datetime(2026, 11, 5, 10, 15, 29, tzinfo=UTC)), detections)
-
-
-def test_the_own_vocabulary_profile_sends_each_l0_once_not_retained(broker: Broker) -> None:
-    source = FakeResults({"a": CLEAR})
-    with subscribed(broker) as subscriber, publishing(source, settings_for(broker)):
-        wait_for(lambda: subscriber.on(OWN + "a"))
-        source.l0 = an_l0(detection(160, 120, confidence=0.7))
-        wait_for(lambda: subscriber.on(OWN_L0))
-        time.sleep(0.3)
-        assert len(subscriber.on(OWN_L0)) == 1
-        source.l0 = an_l0()
-        wait_for(lambda: len(subscriber.on(OWN_L0)) == 2)
-        with subscribed(broker) as late:
-            time.sleep(0.3)
-            assert late.on(OWN_L0) == []
-
-    first, second = subscriber.on(OWN_L0)
-    assert payload(first) == {
-        "captured_at": "2026-11-05T10:15:29+00:00",
-        "detections": [
-            {
-                "centre": {"x": 160, "y": 120},
-                "length": 50,
-                "width": 30,
-                "angle": 0,
-                "class": "passenger",
-                "confidence": 0.7,
-            }
-        ],
-    }
-    assert not first.retain
-    assert payload(second)["detections"] == []
-
-
-def test_the_control_profile_sends_no_l0(broker: Broker) -> None:
-    source = FakeResults({"a": CLEAR})
-    source.l0 = an_l0(detection(160, 120))
-    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "control")):
-        wait_for(lambda: len(subscriber.on(CONTROL)) >= 2)
-    assert {message.topic for message in subscriber.messages} == {CONTROL}
-
-
-def test_no_l0_goes_out_with_no_archive_id(broker: Broker) -> None:
-    source = FakeResults({"a": L1Entry("unknown", reason="archive has no id")}, archive_id=None)
-    source.l0 = an_l0(detection(160, 120))
-    settings = settings_for(broker, "occupancy", "control")
-    with subscribed(broker) as subscriber, publishing(source, settings):
-        wait_for(lambda: len(subscriber.on(CONTROL)) >= 2)
-        source.l0 = an_l0()
-        time.sleep(0.3)
-    assert {message.topic for message in subscriber.messages} == {CONTROL}
 
 
 def test_one_l0_message_per_detector_run_on_the_real_loop(broker: Broker, tmp_path: Path) -> None:
@@ -1201,3 +867,328 @@ def test_one_l0_message_per_detector_run_on_the_real_loop(broker: Broker, tmp_pa
         ran = detector.runs
     assert ran - 1 <= sent <= ran  # A run before the broker connected sends nothing.
     assert {"state": "occupied", "confidence": 0.8} in map(payload, subscriber.on(OWN + "a"))
+
+
+def test_the_paho_connection_s_will_goes_out_on_abandon_and_not_on_disconnect(
+    broker: Broker,
+) -> None:
+    """What the test connection stands in for, on the wire."""
+    connect = paho_connect(settings_for(broker))
+    with subscribed(broker) as subscriber:
+        clean = connect("occupancy-service-clean", "clean", ("will/clean", b"gone", 0, False))
+        killed = connect("occupancy-service-killed", "killed", ("will/killed", b"gone", 0, False))
+        wait_for(lambda: clean.is_connected() and killed.is_connected())
+        assert clean.take_fresh() and not clean.take_fresh()
+        assert clean.publish("said/clean", b"hello", 0, False)
+        subscriber.wait_for(lambda m: m.topic == "said/clean")
+        clean.disconnect()
+        clean.join()
+        assert clean.has_ended() and not clean.publish("said/clean", b"again", 0, False)
+        killed.abandon()
+        subscriber.wait_for(lambda m: m.topic == "will/killed")
+        time.sleep(0.3)
+        assert subscriber.on("will/clean") == []
+    assert disconnected_clients(broker) == ["occupancy-service-clean"]
+    assert closed_clients(broker) == ["occupancy-service-killed"]
+
+
+# What the publisher decides, on the test connection.
+
+
+@contextmanager
+def faked(source: Any, *profiles: str) -> Iterator[tuple[Publisher, FakeConnect]]:
+    """A publisher on the test connection, with ``profiles`` active."""
+    connect = FakeConnect()
+    settings = PublisherSettings(profiles=profiles or ("occupancy",))
+    publisher = Publisher(settings, source, connect=connect)
+    publisher.start()
+    try:
+        yield publisher, connect
+    finally:
+        publisher.stop()
+
+
+def shared_connected(connect: FakeConnect) -> FakeConnection:
+    """The shared connection, once it has been made, connected."""
+    wait_for(lambda: connect.made)
+    shared = connect.made[0]
+    shared.connect()
+    return shared
+
+
+def bodies(connection: FakeConnection, topic: str) -> list[bytes]:
+    return [message.body for message in connection.on(topic)]
+
+
+def sent(message: Published) -> Any:
+    return json.loads(message.body)
+
+
+def test_shared_profiles_open_one_connection_between_them() -> None:
+    source = FakeResults(jmri_sensors(6))
+    with faked(source, "occupancy", "control") as (_, connect):
+        shared = shared_connected(connect)
+        wait_for(lambda: len(shared.on(CONTROL)) >= 6 and shared.on(OWN + "s05"))
+        assert len(connect.made) == 1
+    assert re.fullmatch(r"occupancy-service-[0-9a-f]{8}", shared.client_id)
+    assert shared.will is None
+
+
+@pytest.mark.parametrize(
+    ("profile", "will"),
+    [
+        ("jmri", (JMRI + "a", b"ACTIVE", 0, True)),
+        ("rocrail", (ROCRAIL, fb("a", True), 1, False)),
+    ],
+)
+def test_each_sensor_on_a_per_sensor_profile_has_its_client_id_and_will(
+    profile: str, will: tuple[str, bytes, int, bool]
+) -> None:
+    with faked(FakeResults({"a": CLEAR}), profile) as (_, connect):
+        made = connect.made_as(f"occupancy-service-{profile}-archive-1-a")
+    assert made.will == will
+    assert made.label == f"for sensor 'a' on profile {profile}"
+
+
+def test_a_per_sensor_profile_with_no_will_state_connects_with_no_will(tmp_path: Path) -> None:
+    path = profile_file(tmp_path, connection="per_sensor")
+    with faked(FakeResults({"a": CLEAR}), path) as (_, connect):
+        made = connect.made_as("occupancy-service-fast-archive-1-a")
+    assert made.will is None
+
+
+@pytest.mark.parametrize(
+    ("profile", "topic", "body"),
+    [("jmri", JMRI + "{}", b"ACTIVE"), ("rocrail", ROCRAIL, fb("{}", True))],
+)
+def test_with_no_archive_id_each_sensor_connects_with_no_id_and_reports_unknown(
+    profile: str, topic: str, body: bytes
+) -> None:
+    no_id = L1Entry("unknown", reason="archive has no id")
+    source = FakeResults({"a": no_id, "b": no_id}, archive_id=None)
+    with faked(source, profile) as (_, connect):
+        for id in "ab":
+            made = connect.connected(f"occupancy-service-{profile}-{id}")
+            on = topic.format(id) if "{}" in topic else topic
+            wait_for(lambda made=made, on=on: made.on(on))
+            assert bodies(made, on)[0] == body.replace(b"{}", id.encode())
+    assert sorted(connect.client_ids()) == [
+        f"occupancy-service-{profile}-a",
+        f"occupancy-service-{profile}-b",
+    ]
+
+
+def test_with_no_archive_id_only_a_shared_topic_that_needs_none_reports() -> None:
+    source = FakeResults({"a": L1Entry("unknown", reason="archive has no id")}, archive_id=None)
+    with faked(source, "occupancy", "control") as (_, connect):
+        shared = shared_connected(connect)
+        wait_for(lambda: len(shared.on(CONTROL)) >= 2)
+    assert {message.topic for message in shared.published} == {CONTROL}
+
+
+def test_jmri_connects_a_sensor_a_reload_adds_and_disconnects_one_it_removes() -> None:
+    prefix = "occupancy-service-jmri-archive-1-"
+    source = FakeResults({"kept": CLEAR, "removed": CLEAR})
+    with faked(source, "jmri") as (_, connect):
+        kept = connect.connected(prefix + "kept")
+        removed = connect.connected(prefix + "removed")
+        wait_for(lambda: kept.on(JMRI + "kept") and removed.on(JMRI + "removed"))
+        source.show({"kept": CLEAR, "added": CLEAR})
+        added = connect.connected(prefix + "added")
+        assert wait_for(lambda: bodies(added, JMRI + "added")) == [b"INACTIVE"]
+        wait_for(lambda: removed.disconnects == 1)
+        assert bodies(removed, JMRI + "removed")[-1] == b"ACTIVE"  # Removed: unknown.
+        assert (kept.disconnects, added.disconnects) == (0, 0)
+    assert sorted(connect.client_ids()) == [prefix + "added", prefix + "kept", prefix + "removed"]
+
+
+def test_rocrail_connects_a_sensor_a_reload_adds_and_disconnects_one_it_removes() -> None:
+    prefix = "occupancy-service-rocrail-archive-1-"
+    source = FakeResults({"kept": CLEAR, "removed": CLEAR, "busy": OCCUPIED})
+    with faked(source, "rocrail") as (_, connect):
+        made = {id: connect.connected(prefix + id) for id in ("kept", "removed", "busy")}
+        wait_for(lambda: all(c.published for c in made.values()))
+        source.show({"kept": CLEAR, "added": CLEAR})
+        added = connect.connected(prefix + "added")
+        assert wait_for(lambda: bodies(added, ROCRAIL)) == [fb("added", False)]
+        wait_for(lambda: made["removed"].disconnects == made["busy"].disconnects == 1)
+        assert made["kept"].disconnects == 0
+        # "busy" was already true, so it gets nothing more: Rocrail would take it as a new event.
+        assert bodies(made["busy"], ROCRAIL) == [fb("busy", True)]
+        assert bodies(made["removed"], ROCRAIL) == [fb("removed", False), fb("removed", True)]
+
+
+def test_a_per_sensor_topic_with_the_archive_id_says_removed_on_the_old_one_when_it_changes(
+    tmp_path: Path,
+) -> None:
+    path = profile_file(tmp_path, topic="own/{archive_id}/{sensor}", connection="per_sensor")
+    source = FakeResults({"a": CLEAR})
+    with faked(source, path) as (_, connect):
+        old = connect.connected("occupancy-service-fast-archive-1-a")
+        wait_for(lambda: old.on("own/archive-1/a"))
+        source.show({"a": CLEAR}, archive_id="archive-2")
+        new = connect.connected("occupancy-service-fast-archive-2-a")
+        assert sent(wait_for(lambda: new.on("own/archive-2/a"))[0]) == {"state": "clear"}
+        wait_for(lambda: old.disconnects == 1)
+        assert sent(old.on("own/archive-1/a")[-1]) == {
+            "state": "unknown",
+            "reason": "sensor removed",
+        }
+        assert new.disconnects == 0
+
+
+@pytest.mark.parametrize(
+    ("profile", "topic", "clear"),
+    [("jmri", JMRI + "clear", b"INACTIVE"), ("rocrail", ROCRAIL, fb("clear", False))],
+)
+def test_a_clear_sensor_whose_topic_keeps_on_an_archive_id_change_says_nothing_else(
+    profile: str, topic: str, clear: bytes
+) -> None:
+    source = FakeResults({"clear": CLEAR, "busy": OCCUPIED})
+    with faked(source, profile) as (_, connect):
+        old = {
+            id: connect.connected(f"occupancy-service-{profile}-archive-1-{id}")
+            for id in ("clear", "busy")
+        }
+        wait_for(lambda: old["clear"].on(topic) and old["busy"].published)
+        source.show({"clear": CLEAR, "busy": OCCUPIED}, archive_id="archive-2")
+        new = connect.connected(f"occupancy-service-{profile}-archive-2-clear")
+        assert wait_for(lambda: bodies(new, topic))[0] == clear
+        wait_for(lambda: all(c.disconnects == 1 for c in old.values()))
+        assert set(bodies(old["clear"], topic)) == {clear}
+
+
+def test_a_new_set_of_sensors_and_a_new_id_are_reported_and_a_removed_sensor_is_not(
+    tmp_path: Path,
+) -> None:
+    fast = profile_file(tmp_path, topic="own/{archive_id}/{sensor}")
+    source = FakeResults({"kept": CLEAR, "removed": CLEAR})
+    with faked(source, fast) as (publisher, connect):
+        shared = shared_connected(connect)
+        wait_for(lambda: shared.on("own/archive-1/kept") and shared.on("own/archive-1/removed"))
+        wait_for(lambda: "removed" in publisher.last_messages())
+        source.show({"kept": CLEAR, "added": OCCUPIED}, archive_id="archive-2")
+        wait_for(lambda: shared.on("own/archive-2/kept") and shared.on("own/archive-2/added"))
+        wait_for(lambda: "removed" not in publisher.last_messages())
+        since = len(shared.published)
+        time.sleep(0.3)  # Past a repeat.
+        assert {m.topic for m in shared.published[since:]} == {
+            "own/archive-2/kept",
+            "own/archive-2/added",
+        }
+    assert {message.topic for message in shared.published} == {
+        "own/archive-1/kept",
+        "own/archive-1/removed",
+        "own/archive-2/kept",
+        "own/archive-2/added",
+    }
+
+
+def test_a_clean_stop_sends_unknown_for_every_sensor_then_disconnects() -> None:
+    source = FakeResults({"a": OCCUPIED, "b": CLEAR})
+    with faked(source, "occupancy", "control") as (_, connect):
+        shared = shared_connected(connect)
+        wait_for(lambda: shared.on(OWN + "a") and shared.on(OWN + "b"))
+    stopped = {"state": "unknown", "reason": "service stopped"}
+    assert sent(shared.on(OWN + "a")[-1]) == stopped
+    assert sent(shared.on(OWN + "b")[-1]) == stopped
+    last = {sent(m)["addr"]: sent(m) for m in shared.on(CONTROL)}
+    assert last["a"] == {"addr": "a", "occupancy": "unknown", "reason": "service stopped"}
+    assert last["b"] == {"addr": "b", "occupancy": "unknown", "reason": "service stopped"}
+    assert (shared.disconnects, shared.abandons, shared.joins) == (1, 0, 1)
+    assert len(connect.made) == 1
+
+
+def test_jmri_sends_active_for_every_sensor_on_a_clean_stop_then_disconnects() -> None:
+    with faked(FakeResults({"a": CLEAR, "b": CLEAR}), "jmri") as (_, connect):
+        made = [connect.connected(f"occupancy-service-jmri-archive-1-{id}") for id in "ab"]
+        wait_for(lambda: all(c.published for c in made))
+    for connection, id in zip(made, "ab", strict=True):
+        assert bodies(connection, JMRI + id)[0] == b"INACTIVE"
+        assert bodies(connection, JMRI + id)[-1] == b"ACTIVE"
+        assert (connection.disconnects, connection.abandons, connection.joins) == (1, 0, 1)
+
+
+def test_an_error_in_the_sending_loop_is_logged_and_abandons_every_connection(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    source = FailingResults({"a": CLEAR, "b": CLEAR})
+    with faked(source, "jmri", "occupancy") as (_, connect):
+        wait_for(lambda: len(connect.made) == 3)
+        for connection in connect.made:
+            connection.connect()
+        wait_for(lambda: connect.each(lambda c: bool(c.published)))
+        source.failing = True
+        wait_for(lambda: connect.each(lambda c: c.abandons == 1))
+    assert connect.each(lambda c: c.disconnects == 0 and c.abandons == 1)
+    (error,) = publisher_errors(caplog)
+    assert error.exc_info is not None and "the source broke" in str(error.exc_info[1])
+
+
+def test_a_closed_connection_is_joined_and_dropped_once_it_has_ended() -> None:
+    prefix = "occupancy-service-jmri-archive-1-"
+    source = CountingResults({"kept": CLEAR, "removed": CLEAR})
+    with faked(source, "jmri") as (_, connect):
+        kept = connect.connected(prefix + "kept")
+        removed = connect.connected(prefix + "removed")
+        source.show({"kept": CLEAR})
+        wait_for(lambda: removed.disconnects == 1)
+        calls = source.calls
+        wait_for(lambda: source.calls > calls + 10)  # Serving, with it not ended.
+        assert removed.joins == 0
+        removed.end()
+        wait_for(lambda: removed.joins == 1)
+        calls = source.calls
+        wait_for(lambda: source.calls > calls + 10)
+        assert removed.joins == 1
+    assert (removed.joins, kept.joins) == (1, 1)  # stop() joins it no more.
+
+
+def test_the_own_vocabulary_profile_sends_each_l0_once_not_retained() -> None:
+    source = FakeResults({"a": CLEAR})
+    with faked(source) as (_, connect):
+        shared = shared_connected(connect)
+        wait_for(lambda: shared.on(OWN + "a"))
+        source.l0 = an_l0(detection(160, 120, confidence=0.7))
+        wait_for(lambda: shared.on(OWN_L0))
+        time.sleep(0.3)
+        assert len(shared.on(OWN_L0)) == 1
+        source.l0 = an_l0()
+        wait_for(lambda: len(shared.on(OWN_L0)) == 2)
+
+    first, second = shared.on(OWN_L0)
+    assert sent(first) == {
+        "captured_at": "2026-11-05T10:15:29+00:00",
+        "detections": [
+            {
+                "centre": {"x": 160, "y": 120},
+                "length": 50,
+                "width": 30,
+                "angle": 0,
+                "class": "passenger",
+                "confidence": 0.7,
+            }
+        ],
+    }
+    assert (first.qos, first.retain, second.retain) == (0, False, False)
+    assert sent(second)["detections"] == []
+
+
+def test_the_control_profile_sends_no_l0() -> None:
+    source = FakeResults({"a": CLEAR})
+    source.l0 = an_l0(detection(160, 120))
+    with faked(source, "control") as (_, connect):
+        shared = shared_connected(connect)
+        wait_for(lambda: len(shared.on(CONTROL)) >= 2)
+    assert {message.topic for message in shared.published} == {CONTROL}
+
+
+def test_no_l0_goes_out_with_no_archive_id() -> None:
+    source = FakeResults({"a": L1Entry("unknown", reason="archive has no id")}, archive_id=None)
+    source.l0 = an_l0(detection(160, 120))
+    with faked(source, "occupancy", "control") as (_, connect):
+        shared = shared_connected(connect)
+        wait_for(lambda: len(shared.on(CONTROL)) >= 2)
+        source.l0 = an_l0()
+        time.sleep(0.3)
+    assert {message.topic for message in shared.published} == {CONTROL}
