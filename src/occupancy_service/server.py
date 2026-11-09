@@ -381,7 +381,7 @@ def _l0(l0: L0, run_id: str) -> dict[str, Any]:
 
 def _detector(detector: DetectorState) -> dict[str, Any]:
     if detector.state == "failed":
-        return {"state": "failed", "reason": detector.reason or "the detector did not load"}
+        return {"state": "failed", "reason": detector.reason}
     return {"state": "ok"}
 
 

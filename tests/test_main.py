@@ -185,19 +185,17 @@ def test_a_model_that_does_not_load_does_not_refuse_the_process(
 
 
 FAKE_PACKAGE = """
-from types import SimpleNamespace
-
-
 class Detector:
-    def __init__(self, model, engine, device):
+    def __init__(self, model, engine="onnxruntime", device=None):
         if not model.exists():
             raise FileNotFoundError(model)
         self.engine = engine
 
     def detect(self, frame, dpt):
         height, width = frame.shape[:2]
-        found = dict(length=50, width=30, angle=0, cls=self.engine, confidence=0.75)
-        return [SimpleNamespace(x=width / 2, y=height / 2, **found)]
+        centre = {"x": width / 2, "y": height / 2}
+        found = {"length": 50, "width": 30, "angle": 0, "class": self.engine, "confidence": 0.75}
+        return [{"centre": centre, **found}]
 """
 
 

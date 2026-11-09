@@ -4,26 +4,24 @@ import logging
 import math
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
 from r49.data import STANDARD_GAUGE
 
-from occupancy_service.capture import Frame, decode
+from occupancy_service.capture import Frame, FrameSource, Rate, decode, each_new_frame
 
 _log = logging.getLogger(__name__)
 
-_POLL = 0.01  # Seconds between looks for a new frame.
 _RATE_WINDOW = 10.0  # Seconds of runs the rate is measured over: a run takes about a second.
 _JOIN_WAIT = 2.0  # Seconds stop() waits for the thread, which may be stuck in the detector.
 
 # The prototype's car width in mm, for the box's width: car width = DPT × this / standard gauge.
-STANDARD_WIDTH = 3150.0
+# rails49/detector's SPEC sets it, and its models are trained with it.
+STANDARD_WIDTH = 3000.0
 
 
 @dataclass(frozen=True)
@@ -64,10 +62,6 @@ class Detector(Protocol):
     def detect(self, frame: npt.NDArray[np.uint8], dpt: float) -> Sequence["Detection"]: ...
 
 
-class FrameSource(Protocol):
-    def latest(self) -> Frame | None: ...
-
-
 class L0Loop:
     """Runs the detector on its own thread: it takes the newest frame, runs the detector, and
     waits ``every`` seconds. ``view`` gives the DPT and ``camera.resolution`` to use, and with no
@@ -88,13 +82,18 @@ class L0Loop:
         self._lock = threading.Lock()
         self._l0: L0 | None = None
         self._detect_ms: float | None = None
-        self._runs_at: deque[float] = deque()
+        self._runs = Rate(_RATE_WINDOW)
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         self._stopping.clear()
-        self._thread = threading.Thread(target=self._run, name="l0", daemon=True)
+        self._thread = threading.Thread(
+            target=each_new_frame,
+            args=(self._source, self._stopping, self._detect, self._every),
+            name="l0",
+            daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -106,24 +105,10 @@ class L0Loop:
     def newest(self) -> tuple[L0 | None, L0Stats]:
         """The newest L0, however old, and the stats at this moment."""
         with self._lock:
-            now = time.monotonic()
-            self._forget_runs(now)
-            count = len(self._runs_at)
-            rate = (count - 1) / (now - self._runs_at[0]) if count > 1 else 0.0
+            rate = self._runs.per_second(time.monotonic())
             l0 = self._l0
-            age_ms = None if l0 is None else _age_ms(l0.frame)
+            age_ms = None if l0 is None else l0.frame.age_ms()
             return l0, L0Stats(self._detect_ms, rate, age_ms)
-
-    def _run(self) -> None:
-        seen: int | None = None
-        while not self._stopping.is_set():
-            frame = self._source.latest()
-            if frame is None or frame.id == seen:
-                self._stopping.wait(_POLL)
-                continue
-            seen = frame.id
-            self._detect(frame)
-            self._stopping.wait(self._every)
 
     def _detect(self, frame: Frame) -> None:
         dpt, size = self._view()
@@ -142,22 +127,12 @@ class L0Loop:
         with self._lock:
             self._l0 = L0(frame, detections)
             self._detect_ms = detect_ms
-            now = time.monotonic()
-            self._runs_at.append(now)
-            self._forget_runs(now)
-
-    def _forget_runs(self, now: float) -> None:
-        while self._runs_at and self._runs_at[0] < now - _RATE_WINDOW:
-            self._runs_at.popleft()
-
-
-def _age_ms(frame: Frame) -> float:
-    return max((datetime.now(UTC) - frame.arrived_at).total_seconds() * 1000, 0.0)
+            self._runs.add(time.monotonic())
 
 
 def is_fresh(l0: L0, limit: float) -> bool:
     """Whether ``l0``'s frame reached the service at most ``limit`` seconds ago."""
-    return _age_ms(l0.frame) <= limit * 1000
+    return l0.frame.age_ms() <= limit * 1000
 
 
 @dataclass(frozen=True)

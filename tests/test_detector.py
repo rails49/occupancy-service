@@ -264,17 +264,28 @@ def test_no_detector_field_and_no_l0_with_no_model_path(tmp_path: Path) -> None:
     assert stats.l0 is None
 
 
+# One detection as rails49-detector's ``detect`` returns it: a dict, as its SPEC gives.
+PACKAGE_DETECTION = {
+    "centre": {"x": 160, "y": 120},
+    "length": 50,
+    "width": 31,
+    "angle": 0.5,
+    "class": "loco",
+    "confidence": 0.75,
+}
+
+
 def fake_package(monkeypatch: pytest.MonkeyPatch, make: Any) -> None:
     """Install a ``detector`` module whose ``Detector`` is ``make``."""
     module = types.ModuleType("detector")
-    module.Detector = make  # type: ignore[attr-defined]
+    monkeypatch.setattr(module, "Detector", make, raising=False)
     monkeypatch.setitem(sys.modules, "detector", module)
 
 
 def test_a_model_that_does_not_load_fails_and_l1_comes_from_the_classifier_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def refuse(model: Path, engine: str, device: str) -> None:
+    def refuse(model: Path, engine: str, device: str | None) -> None:
         raise ValueError(f"no model at {model}")
 
     fake_package(monkeypatch, refuse)
@@ -315,18 +326,15 @@ def test_a_model_path_with_the_package_not_installed_fails(
 def test_the_package_is_used_through_its_detector_with_the_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    made: list[tuple[Path, str, str]] = []
-
-    class Found:
-        x, y, length, width, angle, cls, confidence = 160, 120, 50, 31, 0.5, "loco", 0.75
+    made: list[tuple[Path, str, str | None]] = []
 
     class PackageDetector:
-        def __init__(self, model: Path, engine: str, device: str) -> None:
+        def __init__(self, model: Path, engine: str, device: str | None) -> None:
             made.append((model, engine, device))
 
-        def detect(self, frame: Any, dpt: float) -> list[Found]:
+        def detect(self, frame: Any, dpt: float) -> list[dict[str, Any]]:
             assert frame.shape == (240, 320, 3)
-            return [Found()]
+            return [PACKAGE_DETECTION]
 
     fake_package(monkeypatch, PackageDetector)
     archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
@@ -343,6 +351,33 @@ def test_the_package_is_used_through_its_detector_with_the_settings(
     assert made == [(model, "openvino", "GPU")]
     assert result.l0 is not None
     assert result.l0.detections == (Detection(160, 120, 50, 31, 0.5, "loco", 0.75),)
+    assert result.l1["s1"] == L1Entry("occupied", confidence=0.75)
+
+
+def test_the_default_settings_give_onnxruntime_no_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class PackageDetector:  # As rails49-detector's: onnxruntime refuses a device.
+        def __init__(
+            self, model: Path, engine: str = "onnxruntime", device: str | None = None
+        ) -> None:
+            if engine == "onnxruntime" and device is not None:
+                raise ValueError("onnxruntime takes no device")
+
+        def detect(self, frame: Any, dpt: float) -> list[dict[str, Any]]:
+            return [PACKAGE_DETECTION]
+
+    fake_package(monkeypatch, PackageDetector)
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    source = FakeSource()
+    source.show()
+    settings = L1Settings(archive, detector_model=tmp_path / "model.onnx")
+
+    with running(L1Loop(settings, source, FakeScorer({"s1": 0.1}))) as loop:
+        result = newest(loop, lambda r: r.frame is not None and r.l0 is not None)
+        stats = loop.stats()
+
+    assert stats.detector == DetectorState("ok")
     assert result.l1["s1"] == L1Entry("occupied", confidence=0.75)
 
 

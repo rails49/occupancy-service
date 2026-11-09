@@ -4,10 +4,8 @@ import logging
 import os
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from typing import Literal, Protocol
@@ -19,7 +17,14 @@ import r49
 from classifier.runtime import Engine
 
 from occupancy_service import detector_model
-from occupancy_service.capture import CaptureStatus, Frame, decode
+from occupancy_service.capture import (
+    CaptureStatus,
+    Frame,
+    FrameSource,
+    Rate,
+    decode,
+    each_new_frame,
+)
 from occupancy_service.drift import (
     Check,
     DriftCheck,
@@ -41,7 +46,6 @@ from occupancy_service.l0 import (
 
 _log = logging.getLogger(__name__)
 
-_POLL = 0.01  # Seconds between looks for a new frame.
 _WATCH_EVERY = 0.05  # Seconds between looks for a change that no new result brings.
 _RATE_WINDOW = 2.0  # Seconds of results the overall rate is measured over.
 _JOIN_WAIT = 2.0  # Seconds stop() waits for a thread, which may be stuck in a scorer.
@@ -68,9 +72,10 @@ class L1Settings:
     ``drift_tolerance_g`` gauges, and None turns the check off.
 
     With ``detector_model`` set, the detector loads from that path, runs on ``detector_engine``
-    and ``detector_device``, and waits ``detect_every`` seconds after each run. A result is
-    combined with the newest L0 no older than ``l0_limit`` seconds, and a box is ``margin_g``
-    gauges longer than its detection at both ends. None, the default, imports no detector.
+    and ``detector_device`` (None for ``onnxruntime``, which takes no device), and waits
+    ``detect_every`` seconds after each run. A result is combined with the newest L0 no older
+    than ``l0_limit`` seconds, and a box is ``margin_g`` gauges longer than its detection at both
+    ends. None, the default, imports no detector.
     """
 
     archive: str | os.PathLike[str]
@@ -83,7 +88,7 @@ class L1Settings:
     drift_tolerance_g: float | None = 0.5
     detector_model: Path | None = None
     detector_engine: str = "onnxruntime"
-    detector_device: str = "CPU"
+    detector_device: str | None = None
     detect_every: float = 1.0
     l0_limit: float = 5.0
     margin_g: float = 2.0
@@ -203,10 +208,8 @@ class Scorer(Protocol):
     ) -> Scoring: ...
 
 
-class CaptureSource(Protocol):
-    """Where frames come from: a ``Capture``, or a test's fake."""
-
-    def latest(self) -> Frame | None: ...
+class CaptureSource(FrameSource, Protocol):
+    """Where frames come from, with the camera's state: a ``Capture``, or a test's fake."""
 
     def status(self) -> CaptureStatus: ...
 
@@ -373,7 +376,7 @@ class L1Loop:
         self._scored_at = 0.0
         self._camera_ok_since: float | None = None
         self._newest_times: _Scored | None = None  # Outlasts ``_scored`` when the camera is lost.
-        self._results_at: deque[float] = deque()
+        self._results = Rate(_RATE_WINDOW)
         self._states: dict[str, L1Entry] = {}
         self._changes: dict[str, int] = {}
         self._subscriptions: set[L1Subscription] = set()
@@ -394,7 +397,12 @@ class L1Loop:
         self._start_detector()
         self._stopping.clear()
         self._threads = [
-            threading.Thread(target=self._run, name="l1", daemon=True),
+            threading.Thread(
+                target=each_new_frame,
+                args=(self._source, self._stopping, self._handle, 0.0),
+                name="l1",
+                daemon=True,
+            ),
             threading.Thread(target=self._watch, name="l1-watch", daemon=True),
         ]
         for thread in self._threads:
@@ -453,10 +461,7 @@ class L1Loop:
         with self._lock:
             result = self._advance()
             times = self._newest_times
-            now = time.monotonic()
-            self._forget_results(now)
-            count = len(self._results_at)
-            rate = (count - 1) / (now - self._results_at[0]) if count > 1 else 0.0
+            rate = self._results.per_second(time.monotonic())
             l0_stats = self._l0_loop.newest()[1] if self._l0_loop is not None else None
             return result, L1Stats(
                 capture_ms=times.capture_ms if times is not None else None,
@@ -531,37 +536,25 @@ class L1Loop:
         has_model = self._scorer is not None or self._model_to_load
         return _geometry_of(manifest, self._settings.no_track_limit_g, has_model)
 
-    def _run(self) -> None:
-        scored_id: int | None = None
-        while not self._stopping.is_set():
-            frame = self._source.latest()
-            if frame is None or frame.id == scored_id:
-                self._stopping.wait(_POLL)
-                continue
-            scored_id = frame.id
+    def _handle(self, frame: Frame) -> None:
+        with self._lock:
+            geometry = self._geometry
+        scored = self._score(frame, geometry)
+        if scored is not None:
+            now = time.monotonic()
             with self._lock:
-                geometry = self._geometry
-            scored = self._score(frame, geometry)
-            if scored is not None:
-                now = time.monotonic()
-                with self._lock:
-                    self._scored, self._scored_at, self._newest_times = scored, now, scored
-                    self._results_at.append(now)
-                    self._forget_results(now)
-                    self._advance()
+                self._scored, self._scored_at, self._newest_times = scored, now, scored
+                self._results.add(now)
+                self._advance()
 
     def _watch(self) -> None:
         while not self._stopping.wait(_WATCH_EVERY):
             with self._lock:
                 self._advance()
 
-    def _forget_results(self, now: float) -> None:
-        while self._results_at and self._results_at[0] < now - _RATE_WINDOW:
-            self._results_at.popleft()
-
     def _score(self, frame: Frame, geometry: _Geometry) -> _Scored | None:
         """The result of ``frame``. None when it is dropped."""
-        capture_ms = max((datetime.now(UTC) - frame.arrived_at).total_seconds() * 1000, 0.0)
+        capture_ms = frame.age_ms()
         start = time.perf_counter()
         image = decode(frame.jpeg)
         decode_ms = (time.perf_counter() - start) * 1000

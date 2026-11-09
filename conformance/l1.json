@@ -1,5 +1,5 @@
 {
- "standard_width_mm": 3150.0,
+ "standard_width_mm": 3000.0,
  "standard_gauge_mm": 1435.0,
  "cases": [
   {
@@ -7,7 +7,7 @@
    "width": 320,
    "height": 240,
    "dpt": 20,
-   "car_width": 43.90243902439025,
+   "car_width": 41.81184668989547,
    "margin_g": 2,
    "detections": [],
    "sensors": {
@@ -34,7 +34,7 @@
    "width": 320,
    "height": 240,
    "dpt": 20,
-   "car_width": 43.90243902439025,
+   "car_width": 41.81184668989547,
    "margin_g": 2,
    "detections": [
     {
@@ -60,11 +60,11 @@
     },
     "side_in": {
      "x": 100,
-     "y": 121.9
+     "y": 120.9
     },
     "side_out": {
      "x": 100,
-     "y": 122
+     "y": 121
     }
    },
    "expected": {
@@ -89,7 +89,7 @@
    "width": 320,
    "height": 240,
    "dpt": 20,
-   "car_width": 43.90243902439025,
+   "car_width": 41.81184668989547,
    "margin_g": 2,
    "detections": [
     {
@@ -140,7 +140,7 @@
    "width": 320,
    "height": 240,
    "dpt": 20,
-   "car_width": 43.90243902439025,
+   "car_width": 41.81184668989547,
    "margin_g": 2,
    "detections": [
     {
@@ -195,7 +195,7 @@
    "width": 320,
    "height": 240,
    "dpt": 20,
-   "car_width": 43.90243902439025,
+   "car_width": 41.81184668989547,
    "margin_g": 2,
    "detections": [
     {
@@ -250,7 +250,7 @@
    "width": 320,
    "height": 240,
    "dpt": 20,
-   "car_width": 43.90243902439025,
+   "car_width": 41.81184668989547,
    "margin_g": 2,
    "detections": [
     {
@@ -305,7 +305,7 @@
    "width": 320,
    "height": 240,
    "dpt": 20,
-   "car_width": 43.90243902439025,
+   "car_width": 41.81184668989547,
    "margin_g": 2,
    "detections": [
     {

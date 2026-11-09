@@ -32,7 +32,7 @@ This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stder
 | `--frame-rate` | `CaptureSettings.frame_rate` | `20` |
 | `--detector-model` | `L1Settings.detector_model` | None: no detector |
 | `--detector-engine` | `L1Settings.detector_engine` | `onnxruntime` |
-| `--detector-device` | `L1Settings.detector_device` | `CPU` |
+| `--detector-device` | `L1Settings.detector_device` | None: `onnxruntime` takes no device |
 
 Each of these refuses the process: it exits 1 with one line on stderr, with no `ffmpeg` started and no port left bound. A flag that argparse refuses, such as a malformed `--broker`, exits 2.
 
@@ -89,7 +89,7 @@ The detector runs on its own thread, so it never holds up the classifier: it tak
 
 Each classifier result is combined with the newest L0 no older than `l0_limit` (5 s), when the result is read, so a reload takes effect with no new run. Past the limit the detector says nothing, and `latest` has no `l0`. Results that are not the classifier's, such as `no frames` or `drift`, are not combined.
 
-The detector says a sensor is occupied when the sensor lies strictly inside a box. A box keeps a detection's centre and angle, takes the car width, `DPT × 3150 / 1435`, in place of the predicted width, and is `margin_g` (2 G) longer at both ends. Where several boxes cover it, the highest confidence wins. A sensor in the frame and in no box is clear, and the detector says nothing of a sensor outside the frame. [`conformance/l1.json`](LIVE.md#l1-cases) holds these cases, for rails49/occupancy#337 to share.
+The detector says a sensor is occupied when the sensor lies strictly inside a box. A box keeps a detection's centre and angle, takes the car width, `DPT × 3000 / 1435`, in place of the predicted width, and is `margin_g` (2 G) longer at both ends. Where several boxes cover it, the highest confidence wins. A sensor in the frame and in no box is clear, and the detector says nothing of a sensor outside the frame. [`conformance/l1.json`](LIVE.md#l1-cases) holds these cases, for rails49/occupancy#337 to share.
 
 | Classifier | Detector | L1 |
 | :--- | :--- | :--- |

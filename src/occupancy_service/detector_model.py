@@ -1,10 +1,10 @@
 """The one module that imports ``rails49-detector``, which is installed separately (AGPL) and is
 not a dependency of this package. Nothing imports it unless a detector model path is set.
 
-It takes the interface of rails49/detector#80 as: ``detector.Detector(model, engine, device)``,
-whose ``detect(frame, dpt)`` takes a frame as height × width × RGB, 8 bits, and the DPT, and
-returns detections, each with ``x``, ``y`` (the centre), ``length``, ``width``, ``angle`` (in
-radians), ``cls`` and ``confidence``, in the frame's pixels.
+It uses the interface rails49/detector's SPEC gives: ``detector.Detector(model_path, engine,
+device)``, whose ``detect(frame, dpt)`` takes a frame as height × width × RGB, 8 bits, and the DPT,
+and returns one dict per detection with ``centre`` (``x`` and ``y``), ``length``, ``width``,
+``angle`` (in radians), ``class`` and ``confidence``, in the frame's pixels.
 """
 
 import importlib
@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from occupancy_service.l0 import Detection, Detector
+from occupancy_service.l0 import Detection, Detector, detection_from_json
 
 PACKAGE = "detector"  # The import name of rails49-detector.
 
@@ -24,7 +24,7 @@ class DetectorUnavailable(Exception):
     """The detector cannot run. The message is the reason ``latest`` gives."""
 
 
-def load(model: Path, engine: str, device: str) -> Detector:
+def load(model: Path, engine: str, device: str | None) -> Detector:
     """The model at ``model``. Raises ``DetectorUnavailable`` when the package is not installed
     or the model does not load."""
     try:
@@ -45,15 +45,4 @@ class _Adapter:
         self._detector = detector
 
     def detect(self, frame: npt.NDArray[np.uint8], dpt: float) -> Sequence[Detection]:
-        return [
-            Detection(
-                x=float(d.x),
-                y=float(d.y),
-                length=float(d.length),
-                width=float(d.width),
-                angle=float(d.angle),
-                cls=str(d.cls),
-                confidence=float(d.confidence),
-            )
-            for d in self._detector.detect(frame, dpt)
-        ]
+        return [detection_from_json(d) for d in self._detector.detect(frame, dpt)]
