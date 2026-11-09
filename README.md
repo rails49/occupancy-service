@@ -173,6 +173,10 @@ A profile is a TOML file. The `profiles` setting names each by a shipped profile
 
 In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
 
+A placeholder is a name of letters, digits and `_` between braces. Braces around a name with a space or a hyphen, such as `{ sensor }` or `{archive-id}`, would go out as text, so a profile holding them in a topic, a payload or a table's key is refused. A table's key cannot hold a placeholder either, since a key is not filled. Other braces are text, so a string payload may be JSON text such as `'{"state": "on"}'`.
+
+A `topic` or `l0_topic` that starts with `$`, which a broker keeps for its own topics, is refused, and so is one whose text without its placeholders is over 65535 bytes in UTF-8, the most MQTT allows.
+
 A profile with an `l0_topic` publishes one message per detector run there, never retained, at the profile's `qos`, and nothing while the archive has no `id`. The message is the [`l0` object of `latest`](LIVE.md#l0) without its `frame_id`, which only `latest` can give. L0 does not repeat, and does not go out on a connect.
 
 A topic that holds `{archive_id}` publishes nothing while the archive has no `id`. A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
