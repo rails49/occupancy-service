@@ -183,7 +183,7 @@ A topic that holds `{archive_id}` publishes nothing while the archive has no `id
 
 ### One connection per sensor
 
-A profile with `connection = "per_sensor"` opens one connection for each sensor it can report, with the keepalive in `PublisherSettings` (5 s). Its client id is `occupancy-service-<profile>-<archive id>-<sensor>`, or `occupancy-service-<profile>-<sensor>` while the archive has no `id`. With a `will_state`, the broker publishes that state's payload on the sensor's topic when the connection ends without a clean disconnect: when the process is killed, its host or network fails, or the publisher fails. A shared connection has no will.
+A profile with `connection = "per_sensor"` opens one connection for each sensor it can report, with the keepalive in `PublisherSettings` (see [MQTT](#mqtt)). Its client id is `occupancy-service-<profile>-<archive id>-<sensor>`, or `occupancy-service-<profile>-<sensor>` while the archive has no `id`. With a `will_state`, the broker publishes that state's payload on the sensor's topic when the connection ends without a clean disconnect: when the process is killed, its host or network fails, or the publisher fails. A shared connection has no will.
 
 - A sensor a reload adds gets its connection with no restart, and sends its state once that connection is up.
 - A sensor a reload removes sends `unknown` with the reason `sensor removed`, then disconnects cleanly, so the broker keeps that `unknown` where the profile is retained.
@@ -278,7 +278,7 @@ Turn it on with `--profile jmri`, or with `--profile occupancy --profile jmri` t
 - `occupied` is `ACTIVE` and `clear` is `INACTIVE`. `unknown` is `ACTIVE` too: JMRI's `MqttSensor` takes only `ACTIVE` and `INACTIVE`, and for anything else logs a warning and keeps the state it had. A sensor JMRI cannot see is taken as occupied.
 - Each message is retained, so JMRI gets every sensor's state when it connects.
 - A person who clicks a sensor in JMRI publishes retained on the same topic. The repeat puts the service's state back within about 1 s.
-- Each sensor has its own connection, whose last will is `ACTIVE`. A service that is killed, or whose host or network fails, leaves every sensor `ACTIVE`: at once for a killed process, and within about 8 s for a failure the broker notices only by the keepalive. A clean stop and a removed sensor leave `ACTIVE` too.
+- Each sensor has its own connection, whose last will is `ACTIVE`. A service that is killed, or whose host or network fails, leaves every sensor `ACTIVE`: at once for a killed process, and, for a failure the broker notices only by the keepalive, within the time given under [MQTT](#mqtt). A clean stop and a removed sensor leave `ACTIVE` too.
 - With no archive `id`, every sensor reads `archive has no id`, which is `ACTIVE`.
 
 JMRI does not notice a hung service whose connections stay up: its sensors keep the last state the service sent.
@@ -305,7 +305,7 @@ Turn it on with `--profile rocrail`, or with `--profile occupancy --profile rocr
 
 - `occupied` is `true` and `clear` is `false`. `unknown` is `true` too, as Rocrail has only the two: a sensor the service cannot see is taken as occupied.
 - Nothing is retained and nothing repeats, because Rocrail takes a repeated `true` as a new event. A change goes out only when it turns `true` into `false` or back, so `occupied` to `unknown`, or a new reason, sends nothing.
-- Each sensor has its own connection, whose last will is `true`. A service that is killed, or whose host or network fails, turns every sensor `true`: at once for a killed process, and within about 8 s for a failure the broker notices only by the keepalive. A clean stop leaves every sensor `true` too.
+- Each sensor has its own connection, whose last will is `true`. A service that is killed, or whose host or network fails, turns every sensor `true`: at once for a killed process, and, for a failure the broker notices only by the keepalive, within the time given under [MQTT](#mqtt). A clean stop leaves every sensor `true` too.
 - A sensor the manifest removes is sent `true`, if it was not already, and stays `true` in Rocrail.
 - With no archive `id`, every sensor reads `archive has no id`, which is `true`.
 
