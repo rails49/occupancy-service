@@ -22,6 +22,7 @@ import numpy.typing as npt
 import r49
 from PIL import Image
 
+from occupancy_service.active_profile import LastMessage
 from occupancy_service.archive_writer import MANIFEST as _MANIFEST
 from occupancy_service.archive_writer import ArchiveWriter, Refused, can_name, etag_of
 from occupancy_service.capture import CaptureStatus, Frame
@@ -29,7 +30,6 @@ from occupancy_service.drift import DriftReading, DriftUnmeasured
 from occupancy_service.l0 import L0, l0_json
 from occupancy_service.l1 import DetectorState, L1Entry, L1Loop, L1Result, L1Stats
 from occupancy_service.origin import is_own_page
-from occupancy_service.publisher import LastMessage
 
 _log = logging.getLogger(__name__)
 
