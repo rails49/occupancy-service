@@ -25,19 +25,18 @@ class Sent:
     """A ``send`` that records what it is given, and fails while ``up`` is false."""
 
     up: bool = True
-    messages: list[tuple[str, str | None, str, bytes, int, bool]] = field(default_factory=list)
-    refused: list[tuple[str, str | None, str, bytes, int, bool]] = field(default_factory=list)
+    messages: list[tuple[str, bytes, int, bool]] = field(default_factory=list)
+    refused: list[tuple[str, bytes, int, bool]] = field(default_factory=list)
 
-    def __call__(
-        self, sensor: str, archive_id: str | None, topic: str, body: bytes, qos: int, retain: bool
-    ) -> bool:
-        (self.messages if self.up else self.refused).append(
-            (sensor, archive_id, topic, body, qos, retain)
-        )
+    def __call__(self, topic: str, body: bytes, qos: int, retain: bool) -> bool:
+        (self.messages if self.up else self.refused).append((topic, body, qos, retain))
         return self.up
 
     def bodies(self, sensor: str = "a") -> list[str]:
-        return [body.decode() for s, _, _, body, _, _ in self.messages if s == sensor]
+        """What went out on ``sensor``'s topic, whose last level is the sensor's id."""
+        return [
+            body.decode() for topic, body, _, _ in self.messages if topic.endswith(f"/{sensor}")
+        ]
 
     def clear(self) -> None:
         self.messages.clear()
@@ -86,23 +85,16 @@ def test_fresh_sends_every_sensor_on_its_topic_with_the_profiles_qos_and_retain(
     profile, sent = active(a_profile())
     profile.fresh(result({"a": OCCUPIED, "b": NO_FRAMES}))
     assert sent.messages == [
-        ("a", "archive-1", "t/a", b"ON", 1, True),
-        ("b", "archive-1", "t/b", b"? no frames", 1, True),
+        ("t/a", b"ON", 1, True),
+        ("t/b", b"? no frames", 1, True),
     ]
-
-
-def test_fresh_for_one_sensor_sends_only_that_sensor() -> None:
-    profile, sent = active(a_profile())
-    profile.fresh(result({"a": OCCUPIED, "b": CLEAR}), "b")
-    assert sent.bodies("b") == ["OFF"]
-    assert sent.bodies("a") == []
 
 
 def test_a_change_sends_the_sensors_entry_in_the_newest_result_and_only_that_sensor() -> None:
     profile, sent = active(a_profile(repeat=60))
     profile.step([], result({"a": CLEAR, "b": CLEAR}), now=0)
     profile.step(changes(a=OCCUPIED), result({"a": STALLED, "b": CLEAR}), now=1)
-    assert sent.messages == [("a", "archive-1", "t/a", b"? scoring stalled", 1, True)]
+    assert sent.messages == [("t/a", b"? scoring stalled", 1, True)]
 
 
 def test_a_sensor_that_changes_more_than_once_between_passes_sends_its_newest_entry_once() -> None:
@@ -126,12 +118,6 @@ def test_stop_sends_unknown_for_every_sensor() -> None:
     profile, sent = active(a_profile())
     profile.stop(result({"a": OCCUPIED, "b": CLEAR}))
     assert (sent.bodies("a"), sent.bodies("b")) == (["? service stopped"], ["? service stopped"])
-
-
-def test_removed_sends_sensor_removed_on_the_topic_of_the_archive_id_it_is_given() -> None:
-    profile, sent = active(a_profile(topic="t/{archive_id}/{sensor}"))
-    profile.removed("a", "archive-0")
-    assert sent.messages == [("a", "archive-0", "t/archive-0/a", b"? sensor removed", 1, True)]
 
 
 # The repeat.
@@ -193,11 +179,10 @@ def test_no_repeat_sends_everything_on_fresh_even_where_unchanged() -> None:
     assert sent.bodies() == ["ON", "ON"]
 
 
-def test_no_repeat_sends_stop_and_removed_only_where_the_payload_differs() -> None:
+def test_no_repeat_sends_stop_only_where_the_payload_differs() -> None:
     profile, sent = active(a_profile(repeat=0, unknown="ON"))
     profile.fresh(result({"a": OCCUPIED, "b": CLEAR}))
-    profile.removed("a", "archive-1")
-    profile.stop(result({"b": CLEAR}))
+    profile.stop(result({"a": OCCUPIED, "b": CLEAR}))
     assert (sent.bodies("a"), sent.bodies("b")) == (["ON"], ["OFF", "ON"])
 
 
@@ -236,11 +221,9 @@ def test_a_sensor_the_topic_cannot_carry_is_logged_once_and_never_sent(
         profile.step(changes(**{"bad/id": OCCUPIED}), newest, now=0)
         profile.step([], newest, now=5)
         profile.stop(newest)
-    assert {s for s, *_ in sent.messages} == {"good"}
+    assert {topic for topic, *_ in sent.messages} == {"t/good"}
     (refusal,) = refusals(caplog, "bad/id")
     assert "profile p" in refusal.getMessage()
-    assert not profile.carries("bad/id", "archive-1")
-    assert profile.carries("good", "archive-1")
 
 
 def test_a_sensor_a_reload_removes_and_adds_back_is_logged_again(
@@ -267,15 +250,12 @@ def test_with_no_archive_id_a_topic_that_needs_one_sends_nothing_and_logs_nothin
         profile.stop(newest)
     assert sent.messages == []
     assert caplog.records == []
-    assert not profile.carries("a", None)
-    assert profile.carries("a", "archive-1")
 
 
 def test_with_no_archive_id_a_topic_that_needs_none_sends() -> None:
     profile, sent = active(a_profile())
     profile.fresh(result({"a": CLEAR}, archive_id=None))
-    assert sent.messages == [("a", None, "t/a", b"OFF", 1, True)]
-    assert profile.carries("a", None)
+    assert sent.messages == [("t/a", b"OFF", 1, True)]
 
 
 # What it last sent.
@@ -438,7 +418,7 @@ def test_a_hold_is_released_only_when_the_clear_that_ends_it_is_sent() -> None:
     profile.step(changes(a=CLEAR), result({"a": CLEAR}, 0), now=0)
     sent.up = False
     profile.step([], result({"a": CLEAR}, 1), now=1)
-    assert [body for *_, body, _, _ in sent.refused] == [b"OFF"]
+    assert [body for _, body, _, _ in sent.refused] == [b"OFF"]
     sent.up = True
     profile.fresh(result({"a": CLEAR}, 1.1))
     assert sent.bodies()[-1] == "ON"

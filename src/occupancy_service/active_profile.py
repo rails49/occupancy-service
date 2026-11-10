@@ -15,11 +15,10 @@ _log = logging.getLogger(__name__)
 
 _STOPPED = L1Entry("unknown", reason="service stopped")
 _NOT_YET_HELD = L1Entry("unknown", reason="clear not yet held")  # A sensor with nothing sent yet.
-_REMOVED = L1Entry("unknown", reason="sensor removed")  # Before its own connection ends.
 
-type Send = Callable[[str, str | None, str, bytes, int, bool], bool]
-"""``send(sensor, archive_id, topic, body, qos, retain)``: whether the message went to paho. False
-when the connection that carries the sensor is down, or paho refused the message."""
+type Send = Callable[[str, bytes, int, bool], bool]
+"""``send(topic, body, qos, retain)``: whether the message went to paho. False when the connection
+is down, or paho refused the message."""
 
 
 @dataclass(frozen=True)
@@ -126,28 +125,18 @@ class ActiveProfile:
                 next_at = self._due + repeat
                 self._due = next_at if next_at > now else now + repeat
 
-    def fresh(self, newest: L1Result, sensor: str | None = None) -> None:
-        """What a new connection carries: every sensor in ``newest``, or only ``sensor``, sent
-        even where the payload is the one last sent."""
+    def fresh(self, newest: L1Result) -> None:
+        """What a new connection carries: every sensor in ``newest``, sent even where the payload
+        is the one last sent."""
         self._forget_all_but(newest.l1)
-        for id, entry in newest.l1.items():
-            if sensor is None or id == sensor:
-                self._report(id, entry, newest, fresh=True)
+        for sensor, entry in newest.l1.items():
+            self._report(sensor, entry, newest, fresh=True)
 
     def stop(self, newest: L1Result) -> None:
         """``unknown`` with the reason ``service stopped`` for every sensor in ``newest``."""
         self._forget_all_but(newest.l1)
         for sensor in newest.l1:
             self._report(sensor, _STOPPED, newest)
-
-    def removed(self, sensor: str, archive_id: str | None) -> None:
-        """``unknown`` with the reason ``sensor removed`` on ``sensor``'s topic under
-        ``archive_id``, before the connection that carries it there closes."""
-        self._send(sensor, _REMOVED, archive_id)
-
-    def carries(self, sensor: str, archive_id: str | None) -> bool:
-        """Whether this profile has a topic for ``sensor`` under ``archive_id``."""
-        return self._topic(sensor, archive_id) is not None
 
     def next_due(self) -> float:
         """The ``time.monotonic()`` of the next repeat: infinity with none, or none yet set."""
@@ -179,7 +168,7 @@ class ActiveProfile:
         body = encode(message)
         if profile.repeat == 0 and not fresh and self._sent.get(sensor) == (topic, body):
             return True
-        if not self._send_to(sensor, archive_id, topic, body, profile.qos, profile.retain):
+        if not self._send_to(topic, body, profile.qos, profile.retain):
             return False
         if profile.repeat == 0:
             self._sent[sensor] = (topic, body)

@@ -3,6 +3,7 @@ and a real ``mosquitto`` where a broker is named."""
 
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -440,9 +441,8 @@ def test_sigterm_says_service_stopped_for_every_sensor(
 
 def killed(service: Service, camera: FakeFfmpeg) -> float:
     """Kills the child with SIGKILL, and the ``ffmpeg`` it can no longer stop. It is frozen first
-    until what it sent has arrived, so that what arrives after the returned time is the broker's,
-    which may come before ``wait`` returns. The broker waits 1.5 keepalives, 7.5 s, to notice a
-    frozen one."""
+    until what it sent has arrived, so that anything that arrives after the returned time is the
+    broker's."""
     pids = [start.pid for start in wait_for(camera.starts)]
     service.process.send_signal(signal.SIGSTOP)
     time.sleep(0.5)
@@ -454,68 +454,30 @@ def killed(service: Service, camera: FakeFfmpeg) -> float:
     return died_at
 
 
-def test_sigkill_leaves_active_retained_on_every_jmri_sensor(
+def test_sigkill_sends_nothing_more_on_any_profile_and_jmri_keeps_its_retained_state(
     tmp_path: Path, camera: FakeFfmpeg, archive: Path, broker: Broker
 ) -> None:
-    broker.start()
-    subscriber = Subscriber(broker.port)
-    topics = [f"track/sensor/{id}" for id in SENSORS]
-    try:
-        with started(tmp_path, camera, archive, broker.port, "--profile", "jmri") as service:
-            wait_for(lambda: all(subscriber.on(topic) for topic in topics), 10)
-            died_at = killed(service, camera)
-        # Nothing of the service's sends after it died: these are the broker's, from each will.
-        for topic in topics:
-            will = subscriber.wait_for(lambda m, t=topic: m.topic == t and m.at > died_at)
-            assert will.payload == b"ACTIVE"
-    finally:
-        subscriber.close()
-    late = Subscriber(broker.port)
-    try:
-        for topic in topics:
-            kept = late.wait_for(lambda m, t=topic: m.topic == t)
-            assert (kept.payload, kept.retain) == (b"ACTIVE", True)
-    finally:
-        late.close()
-
-
-def test_sigkill_on_a_shared_profile_sends_no_will(
-    tmp_path: Path, camera: FakeFfmpeg, archive: Path, broker: Broker
-) -> None:
-    broker.start()
-    subscriber = Subscriber(broker.port)
-    try:
-        with started(tmp_path, camera, archive, broker.port) as service:
-            subscriber.wait_for(lambda m: m.topic == f"{OWN}s1", 10)
-            died_at = killed(service, camera)
-        time.sleep(1)
-        assert [m for m in subscriber.messages if m.at > died_at] == []
-    finally:
-        subscriber.close()
-
-
-def test_sigkill_sends_one_true_per_rocrail_sensor_and_retains_nothing(
-    tmp_path: Path, camera: FakeFfmpeg, archive: Path, broker: Broker
-) -> None:
+    """The service has no last will: a controller sees the messages stop, and nothing else."""
     broker.start()
     subscriber = Subscriber(broker.port, qos=1)
-    topic = "rocrail/service/field"
-    true = {f'<fb id="{id}" state="true"/>'.encode() for id in SENSORS}
+    jmri = [f"track/sensor/{id}" for id in SENSORS]
+    profiles = ("--profile", "occupancy", "--profile", "jmri", "--profile", "rocrail")
     try:
-        with started(tmp_path, camera, archive, broker.port, "--profile", "rocrail") as service:
-            wait_for(lambda: len(subscriber.on(topic)) >= len(SENSORS), 10)
+        with started(tmp_path, camera, archive, broker.port, *profiles) as service:
+            wait_for(lambda: all(subscriber.on(topic) for topic in jmri), 10)
+            wait_for(lambda: subscriber.on("rocrail/service/field") and subscriber.on(f"{OWN}s1"))
             died_at = killed(service, camera)
-        # Nothing of the service's sends after it died: these are the broker's, from each will.
-        wait_for(lambda: len([m for m in subscriber.on(topic) if m.at > died_at]) >= len(SENSORS))
+        dropped = r"Client occupancy-service-\S+ (closed its connection|has exceeded timeout)"
+        wait_for(lambda: re.search(dropped, broker.log.read_text(errors="replace")), 15)
         time.sleep(0.5)
-        wills = [m for m in subscriber.on(topic) if m.at > died_at]
-        assert sorted(m.payload for m in wills) == sorted(true)
-        assert {(m.qos, m.retain) for m in wills} == {(1, False)}
+        assert [m for m in subscriber.messages if m.at > died_at] == []
+        last = {topic: subscriber.on(topic)[-1].payload for topic in jmri}
     finally:
         subscriber.close()
     late = Subscriber(broker.port)
     try:
-        time.sleep(0.5)
-        assert late.messages == []
+        for topic in jmri:
+            kept = late.wait_for(lambda m, t=topic: m.topic == t)
+            assert (kept.payload, kept.retain) == (last[topic], True)
     finally:
         late.close()
