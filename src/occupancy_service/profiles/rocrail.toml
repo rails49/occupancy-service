@@ -4,9 +4,6 @@ retain = false
 qos = 1
 # Rocrail takes a repeated true as a new event, and in automatic mode as a ghost train.
 repeat = 0
-# One connection per sensor, so that a dead service leaves each sensor true.
-connection = "per_sensor"
-will_state = "unknown"
 
 [payload]
 occupied = '<fb id="{sensor}" state="true"/>'

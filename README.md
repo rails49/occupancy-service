@@ -167,9 +167,7 @@ A profile is a TOML file. The `profiles` setting names each by a shipped profile
 | `qos` | 0, 1 or 2. |
 | `repeat` | Seconds between sending every sensor, from 0. 0 means no repeat: every sensor still goes out on each connect, and anything else only if its payload differs from the last one sent for that sensor. |
 | `clear_hold_s` | Optional. Seconds to [hold](#holding-clear) a `clear`, from 0. Absent or 0 means no hold. |
-| `connection` | Optional. `shared`, the default, or `per_sensor` for [one connection per sensor](#one-connection-per-sensor). |
-| `l0_topic` | Optional, and only with `shared`. The topic of [L0](#l0), which may hold `{archive_id}`. Absent means no L0. |
-| `will_state` | Optional, and only with `per_sensor`. `occupied`, `clear` or `unknown`: the state whose payload is each sensor's last will, on that sensor's topic, with the profile's `retain` and `qos`. A `{reason}` in it is `connection lost`, and it cannot hold `{confidence}`. Absent means no will. |
+| `l0_topic` | Optional. The topic of [L0](#l0), which may hold `{archive_id}`. Absent means no L0. |
 
 In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
 
@@ -261,8 +259,6 @@ topic = "track/sensor/{sensor}"
 retain = true
 qos = 0
 repeat = 1
-connection = "per_sensor"
-will_state = "unknown"
 
 [payload]
 occupied = "ACTIVE"
@@ -291,8 +287,6 @@ topic = "rocrail/service/field"
 retain = false
 qos = 1
 repeat = 0
-connection = "per_sensor"
-will_state = "unknown"
 
 [payload]
 occupied = '<fb id="{sensor}" state="true"/>'

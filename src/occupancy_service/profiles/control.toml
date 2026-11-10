@@ -1,4 +1,4 @@
-# The contract is rails49/control#1147. There is no last will: layout has a timer per sensor.
+# The contract is rails49/control#1147.
 topic = "tc49/layout/sensor"
 retain = false
 qos = 0

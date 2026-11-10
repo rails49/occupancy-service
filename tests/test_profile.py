@@ -84,7 +84,6 @@ def test_an_l0_topic_has_no_topic_with_no_archive_id_or_one_it_cannot_carry(
         ('l0_topic = "$SYS/l0"', "l0_topic.*\\$"),
         (f'l0_topic = "{"x" * 65536}"', "l0_topic.*65535"),
         ('l0_topic = "l0/{archive-id}"', "l0_topic.*archive-id"),
-        ('connection = "per_sensor"\nl0_topic = "l0"', "l0_topic"),
     ],
 )
 def test_refuses_an_l0_topic_it_cannot_use(tmp_path: Path, line: str, complaint: str) -> None:
@@ -291,54 +290,14 @@ def test_refuses_a_profile_that_does_not_exist(tmp_path: Path) -> None:
         load_profile(str(tmp_path / "gone.toml"))
 
 
-def test_a_profile_shares_one_connection_and_has_no_will_unless_it_says_so(tmp_path: Path) -> None:
-    profile = load_profile(str(write(tmp_path, VALID)))
-    assert profile.connection == "shared"
-    assert profile.will_state is None
-    assert profile.will_for("C3.A") is None
-
-
-def test_a_per_sensor_profile_names_the_state_its_will_says(tmp_path: Path) -> None:
-    text = VALID.replace(
-        "[payload]", 'connection = "per_sensor"\nwill_state = "unknown"\n[payload]'
-    )
-    profile = load_profile(str(write(tmp_path, text)))
-    assert profile.connection == "per_sensor"
-    assert profile.will_state == "unknown"
-    assert profile.will_for("C3.A") == "?"
-
-
-def test_a_will_fills_its_reason_with_connection_lost(tmp_path: Path) -> None:
-    text = VALID.replace(
-        "[payload]", 'connection = "per_sensor"\nwill_state = "unknown"\n[payload]'
-    )
-    text = text.replace('"?"', '{ id = "{sensor}", reason = "{reason}" }')
-    profile = load_profile(str(write(tmp_path, text)))
-    assert profile.will_for("C3.A") == {"id": "C3.A", "reason": "connection lost"}
-
-
-def test_a_per_sensor_profile_may_have_no_will(tmp_path: Path) -> None:
-    text = VALID.replace("[payload]", 'connection = "per_sensor"\n[payload]')
-    profile = load_profile(str(write(tmp_path, text)))
-    assert (profile.connection, profile.will_for("C3.A")) == ("per_sensor", None)
-
-
 @pytest.mark.parametrize(
-    ("lines", "complaint"),
-    [
-        ('connection = "each"', "connection"),
-        ("connection = 1", "connection"),
-        ('will_state = "unknown"', "will_state"),
-        ('connection = "shared"\nwill_state = "unknown"', "will_state"),
-        ('connection = "per_sensor"\nwill_state = "gone"', "will_state"),
-        ('connection = "per_sensor"\nwill_state = 1', "will_state"),
-    ],
+    "line", ['connection = "per_sensor"', 'connection = "shared"', 'will_state = "unknown"']
 )
-def test_refuses_a_connection_or_will_it_cannot_use(
-    tmp_path: Path, lines: str, complaint: str
-) -> None:
-    path = write(tmp_path, VALID.replace("[payload]", f"{lines}\n[payload]"))
-    with pytest.raises(ProfileError, match=complaint):
+def test_refuses_a_connection_or_a_will_state_as_an_unknown_key(tmp_path: Path, line: str) -> None:
+    """Every profile sends on the one shared connection, and none has a last will."""
+    path = write(tmp_path, VALID.replace("[payload]", f"{line}\n[payload]"))
+    key = line.split(" ")[0]
+    with pytest.raises(ProfileError, match=f"unknown key {key}"):
         load_profile(str(path))
 
 
@@ -346,34 +305,21 @@ def test_a_repeat_of_0_means_no_repeat(tmp_path: Path) -> None:
     assert load_profile(str(write(tmp_path, VALID.replace("repeat = 1", "repeat = 0")))).repeat == 0
 
 
-def test_refuses_a_will_whose_payload_needs_a_confidence(tmp_path: Path) -> None:
-    text = VALID.replace(
-        "[payload]", 'connection = "per_sensor"\nwill_state = "occupied"\n[payload]'
-    )
-    path = write(tmp_path, text.replace('"ON"', '"{confidence}"'))
-    with pytest.raises(ProfileError, match="confidence"):
-        load_profile(str(path))
-
-
 def test_the_jmri_profile_says_what_jmri_reads() -> None:
     profile = load_profile("jmri")
     assert (profile.retain, profile.qos, profile.repeat) == (True, 0, 1)
-    assert (profile.connection, profile.will_state) == ("per_sensor", "unknown")
     assert profile.topic_for("C3.A", None) == "track/sensor/C3.A"
     assert profile.message_for("C3.A", OCCUPIED) == "ACTIVE"
     assert profile.message_for("C3.A", CLEAR) == "INACTIVE"
     assert profile.message_for("C3.A", UNKNOWN) == "ACTIVE"
-    assert profile.will_for("C3.A") == "ACTIVE"
     assert profile.clear_hold_s == 0
 
 
 def test_the_rocrail_profile_says_what_rocrail_reads() -> None:
     profile = load_profile("rocrail")
     assert (profile.retain, profile.qos, profile.repeat) == (False, 1, 0)
-    assert (profile.connection, profile.will_state) == ("per_sensor", "unknown")
     assert profile.topic_for("C3.A", None) == "rocrail/service/field"
     assert profile.message_for("C3.A", OCCUPIED) == '<fb id="C3.A" state="true"/>'
     assert profile.message_for("C3.A", CLEAR) == '<fb id="C3.A" state="false"/>'
     assert profile.message_for("C3.A", UNKNOWN) == '<fb id="C3.A" state="true"/>'
-    assert profile.will_for("C3.A") == '<fb id="C3.A" state="true"/>'
     assert profile.clear_hold_s == 0
