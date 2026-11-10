@@ -1,4 +1,4 @@
-"""A connection to no broker, which a test drives by hand, to test what ``Publisher`` decides."""
+"""A connection to no broker, which a test drives by hand, to test what ``Sender`` decides."""
 
 import threading
 from dataclasses import dataclass

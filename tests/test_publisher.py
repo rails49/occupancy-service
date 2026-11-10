@@ -1,5 +1,5 @@
 """The publisher on the wire, against a real ``mosquitto``, on a fake result source and on the
-real L1 loop; and what it decides, on the test connection."""
+real L1 loop; and its thread and connection, on the test connection."""
 
 import json
 import logging
@@ -8,7 +8,6 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +27,6 @@ from fake_l1 import (
 from mqtt_broker import Broker, Received, Subscriber, free_port, mosquitto
 
 from occupancy_service.capture import Frame
-from occupancy_service.l0 import L0
 from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Settings
 from occupancy_service.l1_changes import L1Changes, L1Subscription
 from occupancy_service.live_check import check
@@ -52,7 +50,6 @@ class FakeResults:
         self.l1 = dict(l1)
         self.archive_id = archive_id
         self.frame: Frame | None = None
-        self.l0: L0 | None = None
         self._lock = threading.Lock()  # Taken before the L1Changes lock, as L1Loop does.
         self._changes = L1Changes()
         self._manifest = object()
@@ -60,7 +57,7 @@ class FakeResults:
 
     def latest(self) -> L1Result:
         with self._lock:
-            return L1Result(self.frame, dict(self.l1), {}, None, {}, self.archive_id, l0=self.l0)
+            return L1Result(self.frame, dict(self.l1), {}, None, {}, self.archive_id)
 
     def subscribe(self) -> L1Subscription:
         with self._lock:
@@ -820,10 +817,6 @@ def test_no_python_file_under_src_names_rocrail() -> None:
     assert len(list(src.rglob("*.py"))) > 3
 
 
-def an_l0(*detections: Any) -> L0:
-    return L0(Frame(b"", 7, datetime(2026, 11, 5, 10, 15, 29, tzinfo=UTC)), detections)
-
-
 def test_one_l0_message_per_detector_run_on_the_real_loop(broker: Broker, tmp_path: Path) -> None:
     archive = write_archive(tmp_path / "a", {"a": (160, 120)})
     source = FakeSource()
@@ -875,7 +868,7 @@ def test_a_paho_connection_that_never_connected_ends_after_disconnect() -> None:
     connection.join()
 
 
-# What the publisher decides, on the test connection.
+# The publisher's thread and connection, on the test connection.
 
 
 @contextmanager
@@ -907,66 +900,23 @@ def sent(message: Published) -> Any:
     return json.loads(message.body)
 
 
-def test_every_profile_sends_on_one_connection() -> None:
-    source = FakeResults(jmri_sensors(6))
+def test_one_connection_with_a_random_client_id_is_disconnected_and_joined_once_on_stop() -> None:
+    source = FakeResults({"a": OCCUPIED})
     with faked(source, "occupancy", "control", "jmri", "rocrail") as (_, connect):
         shared = shared_connected(connect)
-        wait_for(lambda: len(shared.on(CONTROL)) >= 6 and shared.on(OWN + "s05"))
-        wait_for(lambda: shared.on(JMRI + "s05") and len(shared.on(ROCRAIL)) == 6)
-        assert len(connect.made) == 1
-    assert re.fullmatch(r"occupancy-service-[0-9a-f]{8}", shared.client_id)
-
-
-def test_a_new_set_of_sensors_and_a_new_id_are_reported_and_a_removed_sensor_is_not(
-    tmp_path: Path,
-) -> None:
-    fast = profile_file(tmp_path, topic="own/{archive_id}/{sensor}")
-    source = FakeResults({"kept": CLEAR, "removed": CLEAR})
-    with faked(source, fast) as (publisher, connect):
-        shared = shared_connected(connect)
-        wait_for(lambda: shared.on("own/archive-1/kept") and shared.on("own/archive-1/removed"))
-        wait_for(lambda: "removed" in publisher.last_messages())
-        source.show({"kept": CLEAR, "added": OCCUPIED}, archive_id="archive-2")
-        wait_for(lambda: shared.on("own/archive-2/kept") and shared.on("own/archive-2/added"))
-        wait_for(lambda: "removed" not in publisher.last_messages())
-        since = len(shared.published)
-        time.sleep(0.3)  # Past a repeat.
-        assert {m.topic for m in shared.published[since:]} == {
-            "own/archive-2/kept",
-            "own/archive-2/added",
-        }
-    assert {message.topic for message in shared.published} == {
-        "own/archive-1/kept",
-        "own/archive-1/removed",
-        "own/archive-2/kept",
-        "own/archive-2/added",
-    }
-
-
-def test_a_clean_stop_sends_unknown_for_every_sensor_then_disconnects() -> None:
-    source = FakeResults({"a": OCCUPIED, "b": CLEAR})
-    with faked(source, "occupancy", "control") as (_, connect):
-        shared = shared_connected(connect)
-        wait_for(lambda: shared.on(OWN + "a") and shared.on(OWN + "b"))
-    stopped = {"state": "unknown", "reason": "service stopped"}
-    assert sent(shared.on(OWN + "a")[-1]) == stopped
-    assert sent(shared.on(OWN + "b")[-1]) == stopped
-    last = {sent(m)["addr"]: sent(m) for m in shared.on(CONTROL)}
-    assert last["a"] == {"addr": "a", "occupancy": "unknown", "reason": "service stopped"}
-    assert last["b"] == {"addr": "b", "occupancy": "unknown", "reason": "service stopped"}
-    assert (shared.disconnects, shared.joins) == (1, 1)
+        wait_for(lambda: shared.on(OWN + "a") and shared.on(JMRI + "a"))
     assert len(connect.made) == 1
-
-
-def test_jmri_sends_active_for_every_sensor_on_a_clean_stop_then_disconnects() -> None:
-    with faked(FakeResults({"a": CLEAR, "b": CLEAR}), "jmri") as (_, connect):
-        shared = shared_connected(connect)
-        wait_for(lambda: shared.on(JMRI + "a") and shared.on(JMRI + "b"))
-    for id in "ab":
-        assert bodies(shared, JMRI + id)[0] == b"INACTIVE"
-        assert bodies(shared, JMRI + id)[-1] == b"ACTIVE"
-        assert shared.on(JMRI + id)[-1].retain
+    assert re.fullmatch(r"occupancy-service-[0-9a-f]{8}", shared.client_id)
+    assert sent(shared.on(OWN + "a")[-1]) == {"state": "unknown", "reason": "service stopped"}
     assert (shared.disconnects, shared.joins) == (1, 1)
+
+
+def test_no_active_profile_makes_no_connection() -> None:
+    connect = FakeConnect()
+    publisher = Publisher(PublisherSettings(profiles=()), FakeResults({"a": CLEAR}), connect)
+    publisher.start()
+    publisher.stop()
+    assert connect.made == []
 
 
 def test_an_error_in_the_sending_loop_is_logged_and_disconnects_cleanly_sending_nothing_more(
@@ -987,55 +937,3 @@ def test_an_error_in_the_sending_loop_is_logged_and_disconnects_cleanly_sending_
     assert len(connect.made) == 1
     (error,) = publisher_errors(caplog)
     assert error.exc_info is not None and "the source broke" in str(error.exc_info[1])
-
-
-def test_the_own_vocabulary_profile_sends_each_l0_once_not_retained() -> None:
-    source = FakeResults({"a": CLEAR})
-    with faked(source) as (_, connect):
-        shared = shared_connected(connect)
-        wait_for(lambda: shared.on(OWN + "a"))
-        source.l0 = an_l0(detection(160, 120, confidence=0.7))
-        wait_for(lambda: shared.on(OWN_L0))
-        time.sleep(0.3)
-        assert len(shared.on(OWN_L0)) == 1
-        source.l0 = an_l0()
-        wait_for(lambda: len(shared.on(OWN_L0)) == 2)
-
-    first, second = shared.on(OWN_L0)
-    assert sent(first) == {
-        "captured_at": "2026-11-05T10:15:29+00:00",
-        "detections": [
-            {
-                "centre": {"x": 160, "y": 120},
-                "length": 50,
-                "width": 30,
-                "angle": 0,
-                "class": "passenger",
-                "confidence": 0.7,
-            }
-        ],
-    }
-    assert (first.qos, first.retain, second.retain) == (0, False, False)
-    assert sent(second)["detections"] == []
-
-
-def test_the_control_profile_sends_no_l0() -> None:
-    source = FakeResults({"a": CLEAR})
-    source.l0 = an_l0(detection(160, 120))
-    with faked(source, "control") as (_, connect):
-        shared = shared_connected(connect)
-        wait_for(lambda: len(shared.on(CONTROL)) >= 2)
-    assert {message.topic for message in shared.published} == {CONTROL}
-
-
-def test_a_new_confidence_alone_sends_nothing(tmp_path: Path) -> None:
-    """With no repeat, only an L1 change sends: ``FakeResults`` keeps ``L1Loop``'s rule."""
-    source = FakeResults({"a": OCCUPIED})
-    with faked(source, profile_file(tmp_path, repeat=0)) as (_, connect):
-        shared = shared_connected(connect)
-        wait_for(lambda: shared.on("own/a"))
-        source.show({"a": L1Entry("occupied", confidence=0.8)})
-        time.sleep(0.3)
-        assert [sent(message) for message in shared.on("own/a")] == [
-            {"state": "occupied", "confidence": 0.93}
-        ]

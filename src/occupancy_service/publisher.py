@@ -5,7 +5,7 @@ import math
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -17,8 +17,8 @@ from paho.mqtt.reasoncodes import ReasonCode
 from occupancy_service.active_profile import ActiveProfile, LastMessage
 from occupancy_service.l0 import L0, l0_json
 from occupancy_service.l1 import L1Result
-from occupancy_service.l1_changes import L1Subscription
-from occupancy_service.profile import ProfileError, encode, load_profile
+from occupancy_service.l1_changes import L1Change, L1Subscription
+from occupancy_service.profile import Profile, ProfileError, encode, load_profile
 
 _log = logging.getLogger(__name__)
 
@@ -186,44 +186,35 @@ def paho_connect(settings: PublisherSettings) -> Connect:
     return connect
 
 
-class Publisher:
-    """One connection to the broker, which every active profile sends on. paho's thread keeps it
-    up and reconnects, and this class's own thread does the sending, through an ``ActiveProfile``
-    per profile, and sends L0.
+class Sender:
+    """Each pass of the publisher, with no thread: what a new connection carries, a new L0, and
+    each active profile's step, all on ``connection``. A profile's ``send`` fails while that is
+    down or None. One thread calls everything but ``last_messages``, which any thread may call."""
 
-    It keeps no result: each message comes from ``latest()``, a change only saying when to send,
-    so a reload needs no restart and nothing it sends is older than ``latest()``.
-    """
-
-    def __init__(
-        self, settings: PublisherSettings, source: ResultSource, connect: Connect | None = None
-    ) -> None:
-        """``connect`` stands in for paho, to the broker the settings name. Raises
-        ``ProfileError`` for an active profile that is wrong."""
-        self._connect = paho_connect(settings) if connect is None else connect
-        self._source = source
-        profiles = [load_profile(name) for name in settings.profiles]
-        names = [profile.name for profile in profiles]
-        for name in {name for name in names if names.count(name) > 1}:
-            raise ProfileError(f"two active profiles are named {name}")
+    def __init__(self, profiles: Sequence[Profile], connection: Connection | None) -> None:
+        self._connection = connection
         self._active = {profile.name: ActiveProfile(profile, self._send) for profile in profiles}
         self._l0_profiles = [profile for profile in profiles if profile.l0_topic is not None]
         self._l0_seen: L0 | None = None  # The newest L0 this has sent, or passed over.
-        self._stopping = threading.Event()
-        self._connection: Connection | None = None
-        self._thread: threading.Thread | None = None
 
-    def start(self) -> None:
-        self._stopping.clear()
-        self._thread = threading.Thread(target=self._run, name="mqtt", daemon=True)
-        self._thread.start()
+    def step(self, changes: Sequence[L1Change], newest: L1Result, now: float) -> None:
+        """``changes`` and ``now`` are those of ``ActiveProfile.step``. A change is told to the
+        holds with no connection up too, as a break in ``clear`` restarts a hold."""
+        if self._connection is not None and self._connection.take_fresh():
+            for active in self._active.values():
+                active.fresh(newest)
+        self._send_l0(newest)
+        for active in self._active.values():
+            active.step(changes, newest, now)
 
-    def stop(self) -> None:
-        """Sends ``unknown`` for every sensor, if the connection is up, then disconnects."""
-        self._stopping.set()
-        if self._thread is not None:
-            self._thread.join(_JOIN_WAIT)
-            self._thread = None
+    def stop(self, newest: L1Result) -> None:
+        """``unknown`` with the reason ``service stopped`` for every sensor, on every profile."""
+        for active in self._active.values():
+            active.stop(newest)
+
+    def next_due(self) -> float:
+        """The ``time.monotonic()`` of the next repeat of any profile: infinity with none."""
+        return min((active.next_due() for active in self._active.values()), default=math.inf)
 
     def last_messages(self) -> dict[str, dict[str, LastMessage]]:
         """Sensor id to profile name to what that profile last sent for it."""
@@ -233,56 +224,9 @@ class Publisher:
                 merged.setdefault(sensor, {})[name] = last
         return merged
 
-    def _run(self) -> None:
-        """Serves until ``stop()``. An error here ends publishing: it is logged, and the
-        connection disconnects cleanly with nothing more sent. Nothing restarts it."""
-        subscription: L1Subscription | None = None
-        try:
-            subscription = self._source.subscribe()
-            if self._active:
-                client_id = f"occupancy-service-{secrets.token_hex(4)}"
-                self._connection = self._connect(client_id, "shared")
-            while not self._stopping.is_set():
-                self._serve_once(subscription)
-            newest = self._source.latest()
-            for active in self._active.values():
-                active.stop(newest)
-        except Exception:
-            _log.exception("publishing has stopped, and the connection to the broker is closed")
-        finally:
-            if subscription is not None:
-                subscription.close()
-            if self._connection is not None:
-                self._connection.disconnect()
-                self._connection.join()
-
-    def _serve_once(self, subscription: L1Subscription) -> None:
-        """One pass: waits for the first change or the next repeat, then sends what a new
-        connection carries, a new L0, and each active profile's step. A change is told to the
-        holds with no connection up too, as a break in ``clear`` restarts a hold."""
-        next_due = min((a.next_due() for a in self._active.values()), default=math.inf)
-        first = subscription.get(max(min(_WAKE, next_due - time.monotonic()), 0))
-        newest = self._source.latest()
-        # latest() queues each change up to its result before it returns, so after this no
-        # change up to that result is still unread.
-        changes = [] if first is None else [first]
-        while (change := subscription.get(0)) is not None:
-            changes.append(change)
-        self._send_on_fresh(newest)
-        self._send_l0(newest)
-        now = time.monotonic()
-        for active in self._active.values():
-            active.step(changes, newest, now)
-
-    def _send_on_fresh(self, result: L1Result) -> None:
-        """Every sensor on every profile, when the connection has just connected."""
-        if self._connection is not None and self._connection.take_fresh():
-            for active in self._active.values():
-                active.fresh(result)
-
     def _send_l0(self, result: L1Result) -> None:
-        """A new L0, once, on each profile with an ``l0_topic``, not retained. Nothing goes out
-        while the broker is gone."""
+        """A new L0, once, on each profile with an ``l0_topic``, not retained. One that comes
+        while the connection is down is never sent."""
         l0 = result.l0
         if l0 is None or l0 is self._l0_seen:
             return
@@ -301,3 +245,80 @@ class Publisher:
         not, the next connection sends what it carries."""
         connection = self._connection
         return connection is not None and connection.publish(topic, body, qos, retain)
+
+
+class Publisher:
+    """One connection to the broker, which every active profile sends on. paho's thread keeps it
+    up and reconnects, and this class's own thread waits for changes and repeats and hands each
+    pass to a ``Sender``.
+
+    It keeps no result: each message comes from ``latest()``, a change only saying when to send,
+    so a reload needs no restart and nothing it sends is older than ``latest()``.
+    """
+
+    def __init__(
+        self, settings: PublisherSettings, source: ResultSource, connect: Connect | None = None
+    ) -> None:
+        """``connect`` stands in for paho, to the broker the settings name. Raises
+        ``ProfileError`` for an active profile that is wrong."""
+        self._connect = paho_connect(settings) if connect is None else connect
+        self._source = source
+        self._profiles = [load_profile(name) for name in settings.profiles]
+        names = [profile.name for profile in self._profiles]
+        for name in {name for name in names if names.count(name) > 1}:
+            raise ProfileError(f"two active profiles are named {name}")
+        self._sender: Sender | None = None  # Made with the connection, on this class's thread.
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._stopping.clear()
+        self._thread = threading.Thread(target=self._run, name="mqtt", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Sends ``unknown`` for every sensor, if the connection is up, then disconnects."""
+        self._stopping.set()
+        if self._thread is not None:
+            self._thread.join(_JOIN_WAIT)
+            self._thread = None
+
+    def last_messages(self) -> dict[str, dict[str, LastMessage]]:
+        """Sensor id to profile name to what that profile last sent for it."""
+        sender = self._sender
+        return {} if sender is None else sender.last_messages()
+
+    def _run(self) -> None:
+        """Serves until ``stop()``. An error here ends publishing: it is logged, and the
+        connection disconnects cleanly with nothing more sent. Nothing restarts it."""
+        subscription: L1Subscription | None = None
+        connection: Connection | None = None
+        try:
+            subscription = self._source.subscribe()
+            if self._profiles:
+                client_id = f"occupancy-service-{secrets.token_hex(4)}"
+                connection = self._connect(client_id, "shared")
+            self._sender = sender = Sender(self._profiles, connection)
+            while not self._stopping.is_set():
+                self._serve_once(subscription, sender)
+            sender.stop(self._source.latest())
+        except Exception:
+            _log.exception("publishing has stopped, and the connection to the broker is closed")
+        finally:
+            if subscription is not None:
+                subscription.close()
+            if connection is not None:
+                connection.disconnect()
+                connection.join()
+
+    def _serve_once(self, subscription: L1Subscription, sender: Sender) -> None:
+        """Waits for the first change or the next repeat, then hands every change and the newest
+        result to ``sender``."""
+        first = subscription.get(max(min(_WAKE, sender.next_due() - time.monotonic()), 0))
+        newest = self._source.latest()
+        # latest() queues each change up to its result before it returns, so after this no
+        # change up to that result is still unread.
+        changes = [] if first is None else [first]
+        while (change := subscription.get(0)) is not None:
+            changes.append(change)
+        sender.step(changes, newest, time.monotonic())
