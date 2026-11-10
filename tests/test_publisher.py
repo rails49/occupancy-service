@@ -25,7 +25,7 @@ from fake_l1 import (
     wait_for,
     write_archive,
 )
-from mqtt_broker import Broker, Received, Subscriber, mosquitto
+from mqtt_broker import Broker, Received, Subscriber, free_port, mosquitto
 
 from occupancy_service.capture import Frame
 from occupancy_service.l0 import L0
@@ -632,6 +632,23 @@ def test_jmri_corrects_a_wrong_retained_value_within_about_1_s(broker: Broker) -
         assert retained(broker, [JMRI + "a"])[JMRI + "a"].payload == b"ACTIVE"
 
 
+def test_jmri_leaves_active_retained_on_a_clean_stop(broker: Broker) -> None:
+    sensors = {"a": CLEAR, "b": CLEAR}
+    topics = [JMRI + id for id in sensors]
+    with subscribed(broker) as subscriber:
+        with publishing(FakeResults(sensors), settings_for(broker, "jmri")):
+            wait_for(lambda: all(subscriber.on(topic) for topic in topics))
+        assert {m.payload for m in subscriber.messages if m.topic in topics} == {
+            b"INACTIVE",
+            b"ACTIVE",
+        }
+    assert {message.payload for message in retained(broker, topics).values()} == {b"ACTIVE"}
+    assert sorted(disconnected_clients(broker)) == [
+        "occupancy-service-jmri-archive-1-a",
+        "occupancy-service-jmri-archive-1-b",
+    ]
+
+
 def test_jmri_gives_a_restarted_broker_every_sensor_again(broker: Broker) -> None:
     sensors = jmri_sensors(6)
     topics = [JMRI + id for id in sensors]
@@ -897,6 +914,16 @@ def test_the_paho_connection_s_will_goes_out_on_abandon_and_not_on_disconnect(
     assert closed_clients(broker) == ["occupancy-service-killed"]
 
 
+def test_a_paho_connection_that_never_connected_ends_after_disconnect() -> None:
+    nothing_listens = PublisherSettings(host="127.0.0.1", port=free_port())
+    connection = paho_connect(nothing_listens)("occupancy-service-alone", "alone", None)
+    time.sleep(0.2)  # Past its first connect attempt, in its wait to retry.
+    assert not connection.is_connected() and not connection.has_ended()
+    connection.disconnect()
+    wait_for(connection.has_ended)
+    connection.join()
+
+
 # What the publisher decides, on the test connection.
 
 
@@ -1111,6 +1138,7 @@ def test_jmri_sends_active_for_every_sensor_on_a_clean_stop_then_disconnects() -
     for connection, id in zip(made, "ab", strict=True):
         assert bodies(connection, JMRI + id)[0] == b"INACTIVE"
         assert bodies(connection, JMRI + id)[-1] == b"ACTIVE"
+        assert connection.on(JMRI + id)[-1].retain
         assert (connection.disconnects, connection.abandons, connection.joins) == (1, 0, 1)
 
 
@@ -1130,12 +1158,13 @@ def test_an_error_in_the_sending_loop_is_logged_and_abandons_every_connection(
     assert error.exc_info is not None and "the source broke" in str(error.exc_info[1])
 
 
-def test_a_closed_connection_is_joined_and_dropped_once_it_has_ended() -> None:
+@pytest.mark.parametrize("connected", [True, False], ids=["connected", "never-connected"])
+def test_a_closed_connection_is_joined_and_dropped_once_it_has_ended(connected: bool) -> None:
     prefix = "occupancy-service-jmri-archive-1-"
     source = CountingResults({"kept": CLEAR, "removed": CLEAR})
     with faked(source, "jmri") as (_, connect):
         kept = connect.connected(prefix + "kept")
-        removed = connect.connected(prefix + "removed")
+        removed = (connect.connected if connected else connect.made_as)(prefix + "removed")
         source.show({"kept": CLEAR})
         wait_for(lambda: removed.disconnects == 1)
         calls = source.calls
