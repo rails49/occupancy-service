@@ -36,7 +36,7 @@ This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stder
 
 Each of these refuses the process: it exits 1 with one line on stderr, with no `ffmpeg` started and no port left bound. A flag that argparse refuses, such as a malformed `--broker`, exits 2.
 
-- An archive that cannot be read, which is anything `r49.load` raises. Without a manifest the service has no sensors, no resolution and no archive id, so it has nothing to do, and it serves nothing. `control`'s timer per sensor reports the silence, and a restart policy picks up a repaired archive with no person restarting anything. A running service that loses its archive keeps its geometry.
+- An archive that cannot be read, which is anything `r49.load` raises, including a manifest with no `id`. Without a manifest the service has no sensors, no resolution and no archive id, so it has nothing to do, and it serves nothing. `control`'s timer per sensor reports the silence, and a restart policy picks up a repaired archive with no person restarting anything. A running service that loses its archive keeps its geometry.
 - A profile that raises `ProfileError`.
 - An address that cannot be bound.
 
@@ -46,7 +46,6 @@ None of these refuses it. The process starts, and the parts report and recover a
 - A broker that is absent: it is retried, and `latest` answers meanwhile.
 - A model that does not load: sensors read `no model`.
 - A detector model that does not load, or a `--detector-model` with `rails49-detector` not installed: `latest` says so in [`detector`](LIVE.md#optional-fields), and L1 comes from the classifier alone.
-- A manifest with no `id`: sensors read `archive has no id`.
 
 SIGTERM and SIGINT both stop the parts and exit 0. `service stopped` goes out for every sensor while a broker is connected, and no `ffmpeg` is left behind.
 
@@ -68,7 +67,6 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 | Reason | When |
 | :--- | :--- |
 | `drift` | The newest [drift reading](#drift) is past the tolerance. This reason is on every sensor, whatever else applies to it. |
-| `archive has no id` | The manifest has no `id`. The service keeps running, so that a page can save the archive and mint one. |
 | `no model` | The model did not load. |
 | `DPT unresolved` | The calibration gives no DPT. |
 | `no track` | The sensor is farther than the limit from every track. |
@@ -98,7 +96,7 @@ The detector says a sensor is occupied when the sensor lies strictly inside a bo
 | `clear` | `clear`, or no fresh L0 | `clear` |
 | `no track` or `no model` | `clear` | `clear` |
 | `no track` or `no model` | no fresh L0 | `unknown` with the classifier's reason |
-| `no frames`, `scoring stalled`, `wrong frame size`, `DPT unresolved`, `outside the frame`, `archive has no id` | any | `unknown` with the classifier's reason |
+| `no frames`, `scoring stalled`, `wrong frame size`, `DPT unresolved`, `outside the frame` | any | `unknown` with the classifier's reason |
 
 `drift` stands over all of these, as in [L1](#l1).
 
@@ -175,9 +173,9 @@ A placeholder is a name of letters, digits and `_` between braces. Braces around
 
 A `topic` or `l0_topic` that starts with `$`, which a broker keeps for its own topics, is refused, and so is one whose text without its placeholders is over 65535 bytes in UTF-8, the most MQTT allows.
 
-A profile with an `l0_topic` publishes one message per detector run there, never retained, at the profile's `qos`, and nothing while the archive has no `id`. The message is the [`l0` object of `latest`](LIVE.md#l0) without its `frame_id`, which only `latest` can give. L0 does not repeat, and does not go out on a connect.
+A profile with an `l0_topic` publishes one message per detector run there, never retained, at the profile's `qos`. The message is the [`l0` object of `latest`](LIVE.md#l0) without its `frame_id`, which only `latest` can give. L0 does not repeat, and does not go out on a connect.
 
-A topic that holds `{archive_id}` publishes nothing while the archive has no `id`. A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and again if a reload removes the sensor and adds it back, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
+A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and again if a reload removes the sensor and adds it back, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
 
 ### When the service dies or hangs
 
@@ -273,7 +271,6 @@ Turn it on with `--profile jmri`, or with `--profile occupancy --profile jmri` t
 - Each message is retained, so JMRI gets every sensor's state when it connects.
 - A person who clicks a sensor in JMRI publishes retained on the same topic. The repeat puts the service's state back within about 1 s.
 - A clean stop leaves every sensor `ACTIVE`, retained. A sensor a reload removes keeps the last state the broker retained for it.
-- With no archive `id`, every sensor reads `archive has no id`, which is `ACTIVE`.
 
 JMRI does not notice a dead or hung service: its sensors keep the last state the service sent, unless a script on the JMRI side [times them out](#when-the-service-dies-or-hangs).
 
@@ -299,7 +296,6 @@ Turn it on with `--profile rocrail`, or with `--profile occupancy --profile rocr
 - Nothing is retained and nothing repeats, because Rocrail takes a repeated `true` as a new event. A change goes out only when it turns `true` into `false` or back, so `occupied` to `unknown`, or a new reason, sends nothing.
 - A clean stop turns every sensor `true`.
 - A sensor the manifest removes is sent nothing more, and keeps its last state in Rocrail.
-- With no archive `id`, every sensor reads `archive has no id`, which is `true`.
 
 In automatic mode, `unknown`, or a false detection, on a block with no train is a ghost train, and by default Rocrail then turns off track power until a person turns it on. That includes a block just released while its sensor stays `true`, as a train's tail leaves it. With `poweroffatghost="false"` on `ctrl` in `rocrail.ini`, a ghost closes only that block, and a running train continues. Outside automatic mode no ghost is reported.
 

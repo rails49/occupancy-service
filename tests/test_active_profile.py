@@ -62,7 +62,7 @@ def a_profile(
 
 
 def result(
-    l1: Mapping[str, L1Entry], seconds: float = 0, archive_id: str | None = "archive-1"
+    l1: Mapping[str, L1Entry], seconds: float = 0, archive_id: str = "archive-1"
 ) -> L1Result:
     """A result whose frame was captured ``seconds`` after ``START``."""
     frame = Frame(b"", 1, START + timedelta(seconds=seconds))
@@ -236,26 +236,6 @@ def test_a_sensor_a_reload_removes_and_adds_back_is_logged_again(
         profile.step([], result({"bad/id": CLEAR}), now=1)
         profile.fresh(result({"bad/id": CLEAR}))
     assert len(refusals(caplog, "bad/id")) == 2
-
-
-def test_with_no_archive_id_a_topic_that_needs_one_sends_nothing_and_logs_nothing(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    profile, sent = active(a_profile(repeat=1, topic="t/{archive_id}/{sensor}"))
-    newest = result({"a": CLEAR}, archive_id=None)
-    with caplog.at_level(logging.WARNING, "occupancy_service.active_profile"):
-        profile.fresh(newest)
-        profile.step(changes(a=OCCUPIED), newest, now=0)
-        profile.step([], newest, now=5)
-        profile.stop(newest)
-    assert sent.messages == []
-    assert caplog.records == []
-
-
-def test_with_no_archive_id_a_topic_that_needs_none_sends() -> None:
-    profile, sent = active(a_profile())
-    profile.fresh(result({"a": CLEAR}, archive_id=None))
-    assert sent.messages == [("t/a", b"OFF", 1, True)]
 
 
 # What it last sent.

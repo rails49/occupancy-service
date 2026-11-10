@@ -48,7 +48,7 @@ class FakeResults:
     """A result source a test drives by hand. Its L1 changes are ``L1Loop``'s, from the same
     ``L1Changes``, with a new manifest at each new archive ``id``."""
 
-    def __init__(self, l1: Mapping[str, L1Entry], archive_id: str | None = "archive-1") -> None:
+    def __init__(self, l1: Mapping[str, L1Entry], archive_id: str = "archive-1") -> None:
         self.l1 = dict(l1)
         self.archive_id = archive_id
         self.frame: Frame | None = None
@@ -66,7 +66,7 @@ class FakeResults:
         with self._lock:
             return self._changes.subscribe()
 
-    def show(self, l1: Mapping[str, L1Entry], archive_id: str | None = "archive-1") -> None:
+    def show(self, l1: Mapping[str, L1Entry], archive_id: str = "archive-1") -> None:
         """Change the result, telling subscribers what ``L1Loop`` would."""
         with self._lock:
             if archive_id != self.archive_id:
@@ -376,19 +376,6 @@ def test_a_stop_with_no_broker_returns(broker: Broker) -> None:
     started = time.monotonic()
     publisher.stop()
     assert time.monotonic() - started < 2
-
-
-def test_with_no_archive_id_only_a_topic_that_needs_none_reports(broker: Broker) -> None:
-    source = FakeResults({"a": L1Entry("unknown", reason="archive has no id")}, archive_id=None)
-    settings = settings_for(broker, "occupancy", "control")
-    with subscribed(broker) as subscriber, publishing(source, settings):
-        wait_for(lambda: len(subscriber.on(CONTROL)) >= 2)
-    assert {message.topic for message in subscriber.messages} == {CONTROL}
-    assert payload(subscriber.on(CONTROL)[0]) == {
-        "addr": "a",
-        "occupancy": "unknown",
-        "reason": "archive has no id",
-    }
 
 
 @pytest.mark.parametrize(
@@ -930,14 +917,6 @@ def test_every_profile_sends_on_one_connection() -> None:
     assert re.fullmatch(r"occupancy-service-[0-9a-f]{8}", shared.client_id)
 
 
-def test_with_no_archive_id_only_a_topic_that_needs_none_reports_on_the_test_connection() -> None:
-    source = FakeResults({"a": L1Entry("unknown", reason="archive has no id")}, archive_id=None)
-    with faked(source, "occupancy", "control") as (_, connect):
-        shared = shared_connected(connect)
-        wait_for(lambda: len(shared.on(CONTROL)) >= 2)
-    assert {message.topic for message in shared.published} == {CONTROL}
-
-
 def test_a_new_set_of_sensors_and_a_new_id_are_reported_and_a_removed_sensor_is_not(
     tmp_path: Path,
 ) -> None:
@@ -1046,17 +1025,6 @@ def test_the_control_profile_sends_no_l0() -> None:
     with faked(source, "control") as (_, connect):
         shared = shared_connected(connect)
         wait_for(lambda: len(shared.on(CONTROL)) >= 2)
-    assert {message.topic for message in shared.published} == {CONTROL}
-
-
-def test_no_l0_goes_out_with_no_archive_id() -> None:
-    source = FakeResults({"a": L1Entry("unknown", reason="archive has no id")}, archive_id=None)
-    source.l0 = an_l0(detection(160, 120))
-    with faked(source, "occupancy", "control") as (_, connect):
-        shared = shared_connected(connect)
-        wait_for(lambda: len(shared.on(CONTROL)) >= 2)
-        source.l0 = an_l0()
-        time.sleep(0.3)
     assert {message.topic for message in shared.published} == {CONTROL}
 
 

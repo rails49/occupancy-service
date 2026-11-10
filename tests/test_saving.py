@@ -279,7 +279,7 @@ def test_a_manifest_that_is_not_json_is_422(service: Service) -> None:
 def test_a_manifest_that_drops_its_id_is_422(service: Service) -> None:
     manifest = service.manifest()
     del manifest["id"]
-    assert service.refusal(manifest) == (422, "manifest/id")
+    assert service.refusal(manifest) == (422, "manifest/schema")
 
 
 def test_a_named_file_or_the_manifest_cannot_be_deleted_and_an_absent_file_is_404(
@@ -468,16 +468,6 @@ def test_after_a_save_the_next_result_has_the_new_sensors(tmp_path: Path) -> Non
         change = changes.get(5)
         assert change is not None and change.sensor == "new"
         assert changes.get(0.05) is None  # So no unknown for the sensor that stayed.
-
-
-def test_a_saved_manifest_that_gains_an_id_ends_archive_has_no_id(tmp_path: Path) -> None:
-    folder = write_archive(tmp_path / "archive", ONE_SENSOR, id=None)
-    with serving(folder) as service:
-        assert service.served().l1["s1"].reason == "archive has no id"
-        assert service.put_manifest(service.manifest() | {"id": "minted"})[0] == 204
-        result = service.served()
-        assert result.l1["s1"].state == "occupied"
-        assert result.archive_id == "minted"
 
 
 def test_the_checker_with_save_passes_on_a_folder_and_leaves_it_as_it_was(

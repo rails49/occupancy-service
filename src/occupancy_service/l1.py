@@ -57,7 +57,6 @@ _DPT_UNRESOLVED = "DPT unresolved"
 _NO_TRACK = "no track"
 _OUTSIDE_THE_FRAME = "outside the frame"
 _NO_MODEL = "no model"
-_NO_ARCHIVE_ID = "archive has no id"
 _DRIFT = "drift"
 # The classifier's reasons for ``unknown`` that the detector may answer. Every other one stands.
 _DETECTOR_MAY_ANSWER = (_NO_TRACK, _NO_MODEL)
@@ -119,7 +118,7 @@ class L1Result:
     scores: Mapping[str, float]
     threshold: float | None
     patches: Mapping[str, npt.NDArray[np.uint8]]
-    archive_id: str | None
+    archive_id: str
     wrong_frame_size: bool = False
     drift: DriftReading | DriftUnmeasured | None = None
     l0: L0 | None = None
@@ -220,7 +219,7 @@ class _Geometry:
 
     sensor_ids: tuple[str, ...]
     positions: Mapping[str, tuple[float, float]]
-    archive_id: str | None
+    archive_id: str
     size: tuple[int, int]
     dpt: float | None
     to_score: tuple[classifier.Sensor, ...]
@@ -234,9 +233,7 @@ def _geometry_of(manifest: r49.Manifest, no_track_limit_g: float, has_model: boo
     to_score: list[classifier.Sensor] = []
     unknown: dict[str, str] = {}
     for sensor in sensors:
-        if manifest.id is None:
-            unknown[sensor.id] = _NO_ARCHIVE_ID
-        elif not has_model:
+        if not has_model:
             unknown[sensor.id] = _NO_MODEL
         elif dpt is None:
             unknown[sensor.id] = _DPT_UNRESOLVED

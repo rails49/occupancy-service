@@ -88,7 +88,7 @@ class ArchiveWriter:
         with self._lock:
             self.check_copy(if_match)
             current = r49.load(self._archive)
-            if current.manifest.id is not None and manifest.id != current.manifest.id:
+            if manifest.id != current.manifest.id:
                 raise Refused(422, _ID_CHANGED)
             held = set(current.entries())
             if any(image.filename not in held for image in manifest.images):

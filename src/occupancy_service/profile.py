@@ -63,23 +63,19 @@ class Profile:
     clear_hold_s: float = 0
     l0_topic: str | None = None
 
-    @property
-    def needs_archive_id(self) -> bool:
-        return "{archive_id}" in self.topic
-
-    def topic_for(self, sensor: str, archive_id: str | None) -> str | None:
+    def topic_for(self, sensor: str, archive_id: str) -> str | None:
         """The topic of ``sensor``. None when a topic cannot carry its id or the archive's: a
         broker drops the client that publishes a wildcard, and a ``/`` would add a level."""
-        values = {"sensor": sensor, "archive_id": archive_id or ""}
+        values = {"sensor": sensor, "archive_id": archive_id}
         for name in _placeholders(self.topic):
             if _NOT_IN_A_LEVEL.search(values[name]):
                 return None
         return _publishable(_fill(self.topic, values))
 
-    def l0_topic_for(self, archive_id: str | None) -> str | None:
-        """The topic of L0. None with no ``l0_topic``, with no archive ``id``, or when the topic
-        cannot carry the archive's ``id``."""
-        if self.l0_topic is None or archive_id is None or _NOT_IN_A_LEVEL.search(archive_id):
+    def l0_topic_for(self, archive_id: str) -> str | None:
+        """The topic of L0. None with no ``l0_topic``, or when the topic cannot carry the
+        archive's ``id``."""
+        if self.l0_topic is None or _NOT_IN_A_LEVEL.search(archive_id):
             return None
         return _publishable(_fill(self.l0_topic, {"archive_id": archive_id}))
 

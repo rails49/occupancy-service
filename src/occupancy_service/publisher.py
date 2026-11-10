@@ -282,7 +282,7 @@ class Publisher:
 
     def _send_l0(self, result: L1Result) -> None:
         """A new L0, once, on each profile with an ``l0_topic``, not retained. Nothing goes out
-        with no archive ``id``, or while the broker is gone."""
+        while the broker is gone."""
         l0 = result.l0
         if l0 is None or l0 is self._l0_seen:
             return

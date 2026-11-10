@@ -45,7 +45,7 @@ def test_the_own_vocabulary_profile_says_what_the_issue_asks() -> None:
 def test_the_control_profile_says_what_the_contract_asks() -> None:
     profile = load_profile("control")
     assert (profile.retain, profile.qos) == (False, 0)
-    assert profile.topic_for("C3.A", None) == "tc49/layout/sensor"
+    assert profile.topic_for("C3.A", "archive-1") == "tc49/layout/sensor"
     assert profile.message_for("C3.A", OCCUPIED) == {"addr": "C3.A", "occupancy": "occupied"}
     assert profile.message_for("C3.A", CLEAR) == {"addr": "C3.A", "occupancy": "clear"}
     assert profile.message_for("C3.A", UNKNOWN) == {
@@ -62,16 +62,14 @@ def test_only_the_own_vocabulary_profile_has_an_l0_topic() -> None:
         assert load_profile(name).l0_topic_for("archive-1") is None
 
 
-def test_an_l0_topic_has_no_topic_with_no_archive_id_or_one_it_cannot_carry(
+def test_an_l0_topic_has_no_topic_with_an_archive_id_it_cannot_carry(
     tmp_path: Path,
 ) -> None:
     profile = load_profile("occupancy")
-    assert profile.l0_topic_for(None) is None
     assert profile.l0_topic_for("a/b") is None
     assert profile.l0_topic_for("a+") is None
     fixed = load_profile(str(write(tmp_path, 'l0_topic = "detections"\n' + VALID)))
     assert fixed.l0_topic_for("archive-1") == "detections"
-    assert fixed.l0_topic_for(None) is None
 
 
 @pytest.mark.parametrize(
@@ -96,11 +94,6 @@ def test_the_control_profile_repeats_within_the_second_its_contract_allows() -> 
     assert load_profile("control").repeat < 1
 
 
-def test_only_a_topic_that_names_the_archive_id_needs_one() -> None:
-    assert load_profile("occupancy").needs_archive_id
-    assert not load_profile("control").needs_archive_id
-
-
 def test_only_the_control_profile_holds_clear() -> None:
     assert load_profile("control").clear_hold_s == 1
     assert load_profile("occupancy").clear_hold_s == 0
@@ -119,7 +112,7 @@ def test_a_profile_may_set_a_hold_of_any_time_from_0(
 def test_a_path_loads_a_profile_named_after_its_file(tmp_path: Path) -> None:
     profile = load_profile(str(write(tmp_path, VALID)))
     assert profile.name == "mine"
-    assert profile.topic_for("s1", None) == "t/s1"
+    assert profile.topic_for("s1", "archive-1") == "t/s1"
 
 
 def test_a_string_is_sent_as_text_and_a_table_as_json(tmp_path: Path) -> None:
@@ -165,7 +158,7 @@ def test_a_payload_may_hold_json_text_and_a_topic_may_fill_up_to_its_limit(
     text = text.replace('"ON"', '\'{"state": "on", "for": "{sensor}"}\'')
     profile = load_profile(str(write(tmp_path, text)))
     assert profile.message_for("s1", OCCUPIED) == '{"state": "on", "for": "s1"}'
-    assert profile.topic_for("s1", None) is None
+    assert profile.topic_for("s1", "archive-1") is None
 
 
 @pytest.mark.parametrize(
@@ -205,7 +198,7 @@ def test_refuses_a_topic_with_a_character_a_broker_calls_malformed(tmp_path: Pat
 
 
 def test_a_topic_that_does_not_hold_the_id_carries_any_sensor() -> None:
-    assert load_profile("control").topic_for("a+b/#", None) == "tc49/layout/sensor"
+    assert load_profile("control").topic_for("a+b/#", "archive-1") == "tc49/layout/sensor"
 
 
 def test_a_topic_cannot_carry_this_archive_id() -> None:
@@ -214,7 +207,7 @@ def test_a_topic_cannot_carry_this_archive_id() -> None:
 
 def test_a_topic_cannot_start_a_system_topic(tmp_path: Path) -> None:
     profile = load_profile(str(write(tmp_path, VALID.replace("t/{sensor}", "{sensor}/t"))))
-    assert profile.topic_for("$SYS", None) is None
+    assert profile.topic_for("$SYS", "archive-1") is None
 
 
 def test_a_sensor_id_with_a_lone_surrogate_still_goes_out_as_text(tmp_path: Path) -> None:
@@ -308,7 +301,7 @@ def test_a_repeat_of_0_means_no_repeat(tmp_path: Path) -> None:
 def test_the_jmri_profile_says_what_jmri_reads() -> None:
     profile = load_profile("jmri")
     assert (profile.retain, profile.qos, profile.repeat) == (True, 0, 1)
-    assert profile.topic_for("C3.A", None) == "track/sensor/C3.A"
+    assert profile.topic_for("C3.A", "archive-1") == "track/sensor/C3.A"
     assert profile.message_for("C3.A", OCCUPIED) == "ACTIVE"
     assert profile.message_for("C3.A", CLEAR) == "INACTIVE"
     assert profile.message_for("C3.A", UNKNOWN) == "ACTIVE"
@@ -318,7 +311,7 @@ def test_the_jmri_profile_says_what_jmri_reads() -> None:
 def test_the_rocrail_profile_says_what_rocrail_reads() -> None:
     profile = load_profile("rocrail")
     assert (profile.retain, profile.qos, profile.repeat) == (False, 1, 0)
-    assert profile.topic_for("C3.A", None) == "rocrail/service/field"
+    assert profile.topic_for("C3.A", "archive-1") == "rocrail/service/field"
     assert profile.message_for("C3.A", OCCUPIED) == '<fb id="C3.A" state="true"/>'
     assert profile.message_for("C3.A", CLEAR) == '<fb id="C3.A" state="false"/>'
     assert profile.message_for("C3.A", UNKNOWN) == '<fb id="C3.A" state="true"/>'

@@ -153,17 +153,14 @@ class ActiveProfile:
             entry = self._hold.report(sensor, entry, _captured_at(newest))
         self._send(sensor, entry, newest.archive_id, fresh)
 
-    def _send(
-        self, sensor: str, entry: L1Entry, archive_id: str | None, fresh: bool = False
-    ) -> bool:
+    def _send(self, sensor: str, entry: L1Entry, archive_id: str, fresh: bool = False) -> bool:
         """Whether ``entry`` is on the topic now: sent, or with no repeat, unless ``fresh``, the
         payload last sent there."""
-        topic = self._topic(sensor, archive_id)
-        if topic is None:
-            if not (archive_id is None and self.profile.needs_archive_id):
-                self._refuse(sensor)
-            return False
         profile = self.profile
+        topic = profile.topic_for(sensor, archive_id)
+        if topic is None:
+            self._refuse(sensor)
+            return False
         message = profile.message_for(sensor, entry)
         body = encode(message)
         if profile.repeat == 0 and not fresh and self._sent.get(sensor) == (topic, body):
@@ -175,13 +172,6 @@ class ActiveProfile:
         with self._lock:
             self._last[sensor] = LastMessage(message, datetime.now(UTC))
         return True
-
-    def _topic(self, sensor: str, archive_id: str | None) -> str | None:
-        """``sensor``'s topic: None while the archive has no ``id`` and the topic needs one, or
-        when the topic cannot carry the sensor's id or the archive's."""
-        if archive_id is None and self.profile.needs_archive_id:
-            return None
-        return self.profile.topic_for(sensor, archive_id)
 
     def _refuse(self, sensor: str) -> None:
         if sensor not in self._refused:
