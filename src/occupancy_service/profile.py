@@ -7,14 +7,13 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from occupancy_service.l1 import L1Entry
 
 _SHIPPED = Path(__file__).parent / "profiles"
 _KEYS = {"topic", "payload", "retain", "qos", "repeat"}
-_OPTIONAL_KEYS = {"clear_hold_s", "connection", "will_state", "l0_topic"}
-_CONNECTIONS = ("shared", "per_sensor")
+_OPTIONAL_KEYS = {"clear_hold_s", "l0_topic"}
 _STATES = ("occupied", "clear", "unknown")
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 # Braces around a name with spaces or hyphens, which a reader takes for a placeholder. Braces
@@ -34,10 +33,8 @@ _MALFORMED = "\0-\x1f\x7f-\x9f\ufdd0-\ufdef" + "".join(
 _NOT_IN_A_TOPIC = re.compile(f"[+#{_MALFORMED}]")
 _NOT_IN_A_LEVEL = re.compile(f"[+#/{_MALFORMED}]")
 _TOPIC_BYTES = 65535  # The most a topic can hold in MQTT.
-_WILL = "connection lost"  # The reason a will gives, for a payload that holds one.
 
 type Message = str | dict[str, Any]
-type State = Literal["occupied", "clear", "unknown"]
 
 
 class ProfileError(ValueError):
@@ -54,9 +51,8 @@ def encode(message: Message) -> bytes:
 @dataclass(frozen=True)
 class Profile:
     """One loaded profile, named after its file. ``repeat`` and ``clear_hold_s`` are in seconds. A
-    ``repeat`` of 0 means no repeat, and a ``clear_hold_s`` of 0 means no hold. ``connection`` is
-    ``shared`` or ``per_sensor``, and only ``per_sensor`` may name a ``will_state``. Only a
-    ``shared`` profile may have an ``l0_topic``, and None means it publishes no L0."""
+    ``repeat`` of 0 means no repeat, and a ``clear_hold_s`` of 0 means no hold. An ``l0_topic`` of
+    None means it publishes no L0."""
 
     name: str
     topic: str
@@ -65,8 +61,6 @@ class Profile:
     qos: int
     repeat: float
     clear_hold_s: float = 0
-    connection: str = "shared"
-    will_state: State | None = None
     l0_topic: str | None = None
 
     @property
@@ -97,13 +91,6 @@ class Profile:
             values["reason"] = entry.reason or ""
         payload = self.payload[entry.state]
         return _fill(payload, values) if isinstance(payload, str) else _render(payload, values)
-
-    def will_for(self, sensor: str) -> Message | None:
-        """The last will of ``sensor``'s connection: the ``will_state`` payload, with the reason
-        ``connection lost``. None with no ``will_state``."""
-        if self.will_state is None:
-            return None
-        return self.message_for(sensor, L1Entry(self.will_state, reason=_WILL))
 
 
 def _publishable(topic: str) -> str | None:
@@ -141,45 +128,21 @@ def _parse(name: str, table: dict[str, Any]) -> Profile:
         raise ValueError(f"unknown key {key}")
     for key in _KEYS - table.keys():
         raise ValueError(f"no {key}")
-    connection = _parse_connection(table.get("connection", "shared"))
-    payload = _parse_payload(table["payload"])
     return Profile(
         name=name,
         topic=_parse_topic(table["topic"]),
-        payload=payload,
+        payload=_parse_payload(table["payload"]),
         retain=_parse_retain(table["retain"]),
         qos=_parse_qos(table["qos"]),
         repeat=_parse_repeat(table["repeat"]),
         clear_hold_s=_parse_clear_hold(table.get("clear_hold_s", 0)),
-        connection=connection,
-        will_state=_parse_will_state(table.get("will_state"), connection, payload),
-        l0_topic=_parse_l0_topic(table.get("l0_topic"), connection),
+        l0_topic=_parse_l0_topic(table.get("l0_topic")),
     )
 
 
-def _parse_connection(connection: Any) -> str:
-    if connection not in _CONNECTIONS:
-        raise ValueError('connection must be "shared" or "per_sensor"')
-    return connection
-
-
-def _parse_will_state(state: Any, connection: str, payload: Mapping[str, Message]) -> State | None:
-    if state is None:
-        return None
-    if connection != "per_sensor":
-        raise ValueError('will_state needs connection = "per_sensor"')
-    if state not in _STATES:
-        raise ValueError("will_state must be occupied, clear or unknown")
-    if "confidence" in _placeholders(payload[state]):
-        raise ValueError(f"will_state {state} has no {{confidence}} to fill its payload")
-    return state
-
-
-def _parse_l0_topic(topic: Any, connection: str) -> str | None:
+def _parse_l0_topic(topic: Any) -> str | None:
     if topic is None:
         return None
-    if connection != "shared":
-        raise ValueError('l0_topic needs connection = "shared"')
     return _parse_topic(topic, "l0_topic", _L0_TOPIC_PLACEHOLDERS)
 
 
