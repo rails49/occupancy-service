@@ -343,31 +343,6 @@ def test_no_model_when_the_model_does_not_load(tmp_path: Path) -> None:
     assert result.frame == frame
 
 
-def test_an_archive_with_no_id_runs_with_every_sensor_unknown(tmp_path: Path) -> None:
-    archive = write_archive(tmp_path / "a", {"s1": (160, 120), "s2": (170, 120)}, id=None)
-    source = FakeSource()
-    frame = source.show()
-    scorer = FakeScorer({"s1": 0.9, "s2": 0.9})
-
-    with running(L1Loop(L1Settings(archive), source, scorer)) as loop:
-        result = served(loop, frame)
-        second = served(loop, source.show())  # It goes on running.
-
-    assert reasons(result) == {"s1": "archive has no id", "s2": "archive has no id"}
-    assert result.archive_id is None
-    assert second.frame is not None
-    assert scorer.calls == 0
-
-
-def test_a_reason_of_the_archive_stays_while_the_camera_is_lost(tmp_path: Path) -> None:
-    archive = write_archive(tmp_path / "a", {"s1": (160, 120)}, id=None)
-    source = FakeSource()
-    source.state = "lost"
-
-    with running(L1Loop(L1Settings(archive), source)) as loop:
-        assert reasons(loop.latest()) == {"s1": "archive has no id"}
-
-
 def test_a_frame_that_does_not_decode_is_dropped(tmp_path: Path) -> None:
     archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
     source = FakeSource()
@@ -502,21 +477,6 @@ def test_a_reload_works_out_the_headings_again(tmp_path: Path) -> None:
 
     assert scorer.sensors[0][0].heading == pytest.approx(0)
     assert scorer.sensors[1][0].heading == pytest.approx(math.pi / 2)
-
-
-def test_a_reload_that_mints_an_id_ends_archive_has_no_id(tmp_path: Path) -> None:
-    archive = write_archive(tmp_path / "a", {"s1": (160, 120)}, id=None)
-    source = FakeSource()
-    frame = source.show()
-
-    with running(L1Loop(L1Settings(archive), source, FakeScorer({"s1": 0.9}))) as loop:
-        served(loop, frame)
-        write_archive(tmp_path / "a", {"s1": (160, 120)})
-        loop.reload()
-        result = served(loop, source.show())
-
-    assert result.l1["s1"].state == "occupied"
-    assert result.archive_id == "archive-1"
 
 
 def test_a_reload_that_fails_raises_and_keeps_the_manifest_in_use(tmp_path: Path) -> None:

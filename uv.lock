@@ -202,7 +202,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.0" },
     { name = "rails49-classifier", specifier = "==0.1.0" },
     { name = "rails49-classifier", extras = ["openvino"], marker = "extra == 'openvino'", specifier = "==0.1.0" },
-    { name = "rails49-r49", specifier = "==0.3.0" },
+    { name = "rails49-r49", specifier = "==0.4.0" },
 ]
 provides-extras = ["openvino"]
 
@@ -629,14 +629,14 @@ openvino = [
 
 [[package]]
 name = "rails49-r49"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/87/c8/ee26ed4f3949a5066eca1e2c3546d864d38d90c49eddd49e0dd93b73782f/rails49_r49-0.3.0.tar.gz", hash = "sha256:e695347b7636b347b0f247fc7de22f3e51011707e8365e2f6e3312f18b356e1d", size = 58034, upload-time = "2026-11-05T14:49:19.81Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bc/ce/82016c5128a1075d9a1926cb92f805b2ee772d2761fab1ef91198c69e13a/rails49_r49-0.4.0.tar.gz", hash = "sha256:e33061e11fb81f4d8868aeabd4152bf364728a1ec815c3024b8592d21ef12923", size = 58053, upload-time = "2026-11-10T09:28:35.005Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ff/d5/698887ad3d4de6c2974d15d72383c6595de8696486e0238142c9269241e5/rails49_r49-0.3.0-py3-none-any.whl", hash = "sha256:81bb613048668e2d1aa1b043a0a595d0880b9220bebf3cb60f3fb6d9982805c8", size = 18516, upload-time = "2026-11-05T14:49:18.585Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/19/273f4980385428c35fbd9e8606710ca81b3103c786b365f6cdf07719c2c1/rails49_r49-0.4.0-py3-none-any.whl", hash = "sha256:fe575f03aea22191ee9a2e4fd3b9f98c4335ea5796e1029a651e2cf65411719b", size = 18514, upload-time = "2026-11-10T09:28:33.817Z" },
 ]
 
 [[package]]

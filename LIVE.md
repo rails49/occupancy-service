@@ -277,7 +277,7 @@ Under `<base>/archive/<path>`, checked in this order:
 | :--- | :--- |
 | A rule of [r49's FORMAT.md](https://github.com/rails49/r49/blob/main/FORMAT.md) | `parse_manifest` refuses it, under that rule. |
 | `images/missing` | It names an image that is absent. |
-| `manifest/id` | It changes or removes an `id` the archive has. |
+| `manifest/id` | It changes the archive's `id`. |
 
 ### After a save
 

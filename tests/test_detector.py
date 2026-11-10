@@ -40,7 +40,6 @@ STANDING = [
     "wrong frame size",
     "DPT unresolved",
     "outside the frame",
-    "archive has no id",
 ]
 
 

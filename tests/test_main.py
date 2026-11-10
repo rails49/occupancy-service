@@ -254,14 +254,6 @@ def test_a_detector_model_with_no_package_does_not_refuse_the_process(
     assert answer["detector"] == {"state": "failed", "reason": "rails49-detector is not installed"}
 
 
-def test_a_manifest_with_no_id_does_not_refuse_the_process(
-    tmp_path: Path, camera: FakeFfmpeg
-) -> None:
-    archive = write_archive(tmp_path / "archive", SENSORS, id=None)
-    with started(tmp_path, camera, archive) as service:
-        assert service.latest()["l1"]["s1"] == {"state": "unknown", "reason": "archive has no id"}
-
-
 def assert_refused(tmp_path: Path, archive: Path | str, *extra: str, port: int = 0) -> str:
     """Runs the child to its end, and checks all a refusal promises. Its one line of stderr."""
     (tmp_path / "bin").mkdir()
@@ -297,6 +289,11 @@ def test_a_broken_manifest_refuses_the_process(tmp_path: Path, manifest: str) ->
     archive = tmp_path / "archive"
     archive.mkdir()
     (archive / "manifest.json").write_text(manifest)
+    assert str(archive) in assert_refused(tmp_path, archive)
+
+
+def test_a_manifest_with_no_id_refuses_the_process(tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "archive", SENSORS, id=None)
     assert str(archive) in assert_refused(tmp_path, archive)
 
 
