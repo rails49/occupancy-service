@@ -149,11 +149,11 @@ A client that closes or resets a connection ends that connection's thread, and n
 
 ## MQTT
 
-`occupancy_service.publisher` publishes L1 as its active profiles say, over `paho-mqtt`: one connection for every profile whose `connection` is `shared`, and [one per sensor](#one-connection-per-sensor) on each profile whose `connection` is `per_sensor`. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive of every connection (5 s), and the timeout of connecting (2 s). A broker gives up on a silent connection after one and a half keepalives, and then sends its [last will](#one-connection-per-sensor), so a will goes out within about 8 s of a host or a network failing. A killed process closes its connections, and the broker sends each will at once. The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them. What each active profile sends, holds and last sent is an `ActiveProfile`, in `occupancy_service.active_profile`; `Publisher` keeps the connections and L0.
+`occupancy_service.publisher` publishes L1 as its active profiles say, over `paho-mqtt`, on one connection that every profile shares. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (5 s), and the timeout of connecting (2 s). The connection has no last will: [When the service dies or hangs](#when-the-service-dies-or-hangs) says what each controller sees. The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them. What each active profile sends, holds and last sent is an `ActiveProfile`, in `occupancy_service.active_profile`; `Publisher` keeps the connection and L0.
 
-Every sensor goes out on each connect of the connection that carries it and on each repeat, and each [L1 change](GLOSSARY.md#l1-change) goes out at once, except a `clear` that a profile [holds](#holding-clear). What goes out for an L1 change is that sensor's entry in the newest result, so an L1 change a later one has already replaced never goes out, and a sensor with more than one L1 change before the publisher looks sends that entry once. A profile with `repeat = 0` does not repeat, and sends an L1 change, a clean stop's `unknown` or a removed sensor's `unknown` only if its payload differs from the last one sent for that sensor. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart. Nothing goes out while a connection is down, and a message at `qos` 1 or 2 the broker had not acknowledged when it was lost is dropped, so the new connection sends only what is current.
+Every sensor goes out on each connect and on each repeat, and each [L1 change](GLOSSARY.md#l1-change) goes out at once, except a `clear` that a profile [holds](#holding-clear). What goes out for an L1 change is that sensor's entry in the newest result, so an L1 change a later one has already replaced never goes out, and a sensor with more than one L1 change before the publisher looks sends that entry once. A profile with `repeat = 0` does not repeat, and sends an L1 change or a clean stop's `unknown` only if its payload differs from the last one sent for that sensor. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. It says nothing more, and neither does a topic that a new archive `id` moves, so on a retained profile the broker keeps the last message on that topic. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart. Nothing goes out while a connection is down, and a message at `qos` 1 or 2 the broker had not acknowledged when it was lost is dropped, so the new connection sends only what is current.
 
-An error in the publisher's own loop, such as a connection that cannot be made, is logged once. Then every connection ends with no clean disconnect, so the broker sends each [will](#one-connection-per-sensor), and nothing more is published. The process goes on, with `latest` and `events`, and a restart publishes again.
+An error in the publisher's own loop, such as a connection that cannot be made, is logged once. Then the connection disconnects cleanly, and nothing more is published. The process goes on, with `latest` and `events`, and a restart publishes again.
 
 ### Profile files
 
@@ -179,16 +179,13 @@ A profile with an `l0_topic` publishes one message per detector run there, never
 
 A topic that holds `{archive_id}` publishes nothing while the archive has no `id`. A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and again if a reload removes the sensor and adds it back, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
 
-### One connection per sensor
+### When the service dies or hangs
 
-A profile with `connection = "per_sensor"` opens one connection for each sensor it can report, with the keepalive in `PublisherSettings` (see [MQTT](#mqtt)). Its client id is `occupancy-service-<profile>-<archive id>-<sensor>`, or `occupancy-service-<profile>-<sensor>` while the archive has no `id`. With a `will_state`, the broker publishes that state's payload on the sensor's topic when the connection ends without a clean disconnect: when the process is killed, its host or network fails, or the publisher fails. A shared connection has no will.
+The connection has no last will. MQTT allows one will per connection, so a will on each sensor's topic would need a connection per sensor, and a will never covered a hung service whose connection stays up. A service that is killed, whose host or network fails, that hangs, or whose publisher fails, stops sending, and the broker sends nothing for it. What each controller sees then:
 
-- A sensor a reload adds gets its connection with no restart, and sends its state once that connection is up.
-- A sensor a reload removes sends `unknown` with the reason `sensor removed`, then disconnects cleanly, so the broker keeps that `unknown` where the profile is retained.
-- When the archive's `id` changes, each sensor's connection disconnects cleanly, and a new one, whose client id holds the new `id`, sends the sensor's state once it is up. Only where the sensor is gone, or its topic holds `{archive_id}` and so changes too, does the old connection first send `unknown` with the reason `sensor removed` on the old topic. A sensor whose topic stays the same sends nothing first, so a `clear` sensor does not read `true` for a moment on Rocrail, which takes it as a ghost train, or `ACTIVE` on JMRI.
-- A clean stop sends `unknown` with the reason `service stopped` on each connection, then disconnects each cleanly.
-
-A hung process whose connections stay up sends nothing, and the broker sends no will, as its paho threads go on answering the keepalive. Only a profile's repeat stopping shows that.
+- `control`: its timer per sensor reads `unknown` after 3 s with no report.
+- [JMRI](#jmri) keeps the last state. A JMRI-side script can do what `control` does: listen on the sensor topics itself, and set a sensor `ACTIVE` after 3 s with no message. It has to read the MQTT messages, as a repeat of the same payload changes no JMRI sensor's state. The `jmri` profile repeats every second, which such a script relies on. This repository does not ship one.
+- [Rocrail](#rocrail) keeps the last state. Its profile does not repeat, so a timer on that side cannot work.
 
 ### Holding `clear`
 
@@ -229,7 +226,7 @@ state = "unknown"
 reason = "{reason}"
 ```
 
-`control`, whose contract is rails49/control#1147. It has no last will, because `layout` has a timer per sensor. That timer wants every sensor at least once a second, so `repeat` leaves room for one to be late. It holds `clear` for 1 s, which rails49/occupancy-service#18 measures on real trains:
+`control`, whose contract is rails49/control#1147. `layout` has a timer per sensor, which reports a [dead or hung service](#when-the-service-dies-or-hangs) and wants every sensor at least once a second, so `repeat` leaves room for one to be late. It holds `clear` for 1 s, which rails49/occupancy-service#18 measures on real trains:
 
 ```toml
 topic = "tc49/layout/sensor"
@@ -275,10 +272,10 @@ Turn it on with `--profile jmri`, or with `--profile occupancy --profile jmri` t
 - `occupied` is `ACTIVE` and `clear` is `INACTIVE`. `unknown` is `ACTIVE` too: JMRI's `MqttSensor` takes only `ACTIVE` and `INACTIVE`, and for anything else logs a warning and keeps the state it had. A sensor JMRI cannot see is taken as occupied.
 - Each message is retained, so JMRI gets every sensor's state when it connects.
 - A person who clicks a sensor in JMRI publishes retained on the same topic. The repeat puts the service's state back within about 1 s.
-- Each sensor has its own connection, whose last will is `ACTIVE`. A service that is killed, or whose host or network fails, leaves every sensor `ACTIVE`: at once for a killed process, and, for a failure the broker notices only by the keepalive, within the time given under [MQTT](#mqtt). A clean stop and a removed sensor leave `ACTIVE` too.
+- A clean stop leaves every sensor `ACTIVE`, retained. A sensor a reload removes keeps the last state the broker retained for it.
 - With no archive `id`, every sensor reads `archive has no id`, which is `ACTIVE`.
 
-JMRI does not notice a hung service whose connections stay up: its sensors keep the last state the service sent.
+JMRI does not notice a dead or hung service: its sensors keep the last state the service sent, unless a script on the JMRI side [times them out](#when-the-service-dies-or-hangs).
 
 `rocrail`, for Rocrail's sensors. It is not active by default:
 
@@ -300,8 +297,8 @@ Turn it on with `--profile rocrail`, or with `--profile occupancy --profile rocr
 
 - `occupied` is `true` and `clear` is `false`. `unknown` is `true` too, as Rocrail has only the two: a sensor the service cannot see is taken as occupied.
 - Nothing is retained and nothing repeats, because Rocrail takes a repeated `true` as a new event. A change goes out only when it turns `true` into `false` or back, so `occupied` to `unknown`, or a new reason, sends nothing.
-- Each sensor has its own connection, whose last will is `true`. A service that is killed, or whose host or network fails, turns every sensor `true`: at once for a killed process, and, for a failure the broker notices only by the keepalive, within the time given under [MQTT](#mqtt). A clean stop leaves every sensor `true` too.
-- A sensor the manifest removes is sent `true`, if it was not already, and stays `true` in Rocrail.
+- A clean stop turns every sensor `true`.
+- A sensor the manifest removes is sent nothing more, and keeps its last state in Rocrail.
 - With no archive `id`, every sensor reads `archive has no id`, which is `true`.
 
 In automatic mode, `unknown`, or a false detection, on a block with no train is a ghost train, and by default Rocrail then turns off track power until a person turns it on. That includes a block just released while its sensor stays `true`, as a train's tail leaves it. With `poweroffatghost="false"` on `ctrl` in `rocrail.ini`, a ghost closes only that block, and a running train continues. Outside automatic mode no ghost is reported.
@@ -309,7 +306,7 @@ In automatic mode, `unknown`, or a false detection, on a block with no train is 
 - Start the service before turning on automatic mode, so every sensor has its state first.
 - Restart the service after restarting Rocrail. With no repeat and no retain, Rocrail keeps the states it had until the next change. This is expected, and not yet tested.
 
-Rocrail does not notice a hung service whose connections stay up, nor a lost broker: its sensors keep the last state the service sent.
+Rocrail does not notice a [dead or hung service](#when-the-service-dies-or-hangs), nor a lost broker: its sensors keep the last state the service sent.
 
 ## Box
 
