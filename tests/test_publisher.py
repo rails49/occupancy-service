@@ -24,7 +24,9 @@ from fake_l1 import (
     wait_for,
     write_archive,
 )
-from mqtt_broker import Broker, Received, Subscriber, free_port, mosquitto
+from rails49_testing.broker import Broker
+from rails49_testing.ports import free_port
+from rails49_testing.subscriber import Received, Subscriber
 
 from occupancy_service.capture import Frame
 from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Settings
@@ -70,29 +72,6 @@ class FakeResults:
                 self._manifest = object()
             self.l1, self.archive_id = dict(l1), archive_id
             self._changes.update(self.l1, self._manifest)
-
-
-@pytest.fixture
-def broker(tmp_path: Path) -> Iterator[Broker]:
-    binary = mosquitto()
-    if binary is None:
-        pytest.skip("mosquitto is not installed")
-    broker = Broker(binary, tmp_path)
-    broker.start()
-    yield broker
-    broker.stop()
-
-
-def test_a_broker_that_cannot_start_says_why_at_once(tmp_path: Path) -> None:
-    binary = tmp_path / "mosquitto"
-    binary.write_text("#!/bin/sh\necho the reason >&2\nexit 3\n")
-    binary.chmod(0o755)
-    broker = Broker(str(binary), tmp_path)
-    started = time.monotonic()
-    with pytest.raises(RuntimeError, match="exit code 3:\\nthe reason"):
-        broker.start()
-    broker.stop()
-    assert time.monotonic() - started < 5
 
 
 @contextmanager
