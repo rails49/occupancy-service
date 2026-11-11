@@ -67,6 +67,38 @@ def test_live_goes_to_the_service_unstripped(project: dict[str, Any]) -> None:
     assert not any("middlewares" in key for key in service)
 
 
+@pytest.mark.parametrize(
+    ("container", "router", "rule", "service", "port"),
+    [
+        ("page", "occupancy-http", "PathPrefix(`/`)", "occupancy", "80"),
+        ("service", "occupancy-live-http", "PathPrefix(`/live`)", "occupancy-live", "8000"),
+    ],
+)
+def test_the_ui_port_serves_each_router_over_plain_http(
+    project: dict[str, Any], container: str, router: str, rule: str, service: str, port: str
+) -> None:
+    found = labels(project, container)
+    prefix = f"traefik.http.routers.{router}."
+    assert found[f"traefik.http.services.{service}.loadbalancer.server.port"] == port
+    assert {k: v for k, v in found.items() if k.startswith(prefix)} == {
+        prefix + "rule": rule,
+        prefix + "entrypoints": "occupancy",
+        prefix + "service": service,
+    }
+
+
+def test_the_websecure_routers_keep_their_certificate(project: dict[str, Any]) -> None:
+    for container, router in [("page", "occupancy"), ("service", "occupancy-live")]:
+        found = labels(project, container)
+        assert found[f"traefik.http.routers.{router}.entrypoints"] == "websecure"
+        assert found[f"traefik.http.routers.{router}.tls.certresolver"] == "le"
+
+
+def test_box_domain_may_be_empty() -> None:
+    done = config({**SETTINGS, "BOX_DOMAIN": ""})
+    assert done.returncode == 0, done.stderr
+
+
 def test_a_replugged_camera_appears_with_no_restart(project: dict[str, Any]) -> None:
     service = project["services"]["service"]
     assert "c 81:* rmw" in service["device_cgroup_rules"]
