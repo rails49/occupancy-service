@@ -192,6 +192,7 @@ dev = [
     { name = "pyright" },
     { name = "pytest" },
     { name = "rails49-classifier", extra = ["openvino"] },
+    { name = "rails49-testing" },
     { name = "ruff" },
 ]
 
@@ -212,6 +213,7 @@ dev = [
     { name = "pyright", specifier = ">=1.1.400" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "rails49-classifier", extras = ["openvino"], specifier = "==0.1.0" },
+    { name = "rails49-testing", git = "https://github.com/rails49/testing?branch=main" },
     { name = "ruff", specifier = ">=0.11" },
 ]
 
@@ -637,6 +639,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bc/ce/82016c5128a1075d9a1926cb92f805b2ee772d2761fab1ef91198c69e13a/rails49_r49-0.4.0.tar.gz", hash = "sha256:e33061e11fb81f4d8868aeabd4152bf364728a1ec815c3024b8592d21ef12923", size = 58053, upload-time = "2026-11-10T09:28:35.005Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/19/273f4980385428c35fbd9e8606710ca81b3103c786b365f6cdf07719c2c1/rails49_r49-0.4.0-py3-none-any.whl", hash = "sha256:fe575f03aea22191ee9a2e4fd3b9f98c4335ea5796e1029a651e2cf65411719b", size = 18514, upload-time = "2026-11-10T09:28:33.817Z" },
+]
+
+[[package]]
+name = "rails49-testing"
+version = "0.1.0"
+source = { git = "https://github.com/rails49/testing?branch=main#1f5d065b3ad0258a99f20cad5c3b20f8dbba496e" }
+dependencies = [
+    { name = "paho-mqtt" },
+    { name = "pytest" },
 ]
 
 [[package]]
