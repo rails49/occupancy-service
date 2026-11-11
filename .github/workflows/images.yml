@@ -1,6 +1,12 @@
 # Both images at one commit, each built on an amd64 and an arm64 runner, tested, pushed by digest
 # and joined under ghcr.io/rails49/occupancy-<role>:<commit>. An image already there for the
-# commit is not built again. The installation's release workflow calls this (rails49/.github#71).
+# commit is not built again. The installation's release workflow calls this (rails49/.github#71):
+#
+#   uses: rails49/occupancy-service/.github/workflows/images.yml@<commit>
+#   with:
+#     commit: <commit>
+#
+# The caller grants `packages: write`. The outputs are the full commit and both digests.
 name: images
 
 on:
@@ -11,6 +17,9 @@ on:
         required: true
         type: string
     outputs:
+      commit:
+        description: The full commit both images are named by
+        value: ${{ jobs.commit.outputs.commit }}
       occupancy-service:
         description: The service image's digest
         value: ${{ jobs.digests.outputs.service }}
@@ -61,8 +70,7 @@ jobs:
           done
           echo "missing=[$(IFS=,; echo "${missing[*]}")]" >> "$GITHUB_OUTPUT"
 
-      # compose.yaml and the archive the release check starts the service with. The service
-      # mounts no other file of this repository.
+      # compose.yaml and the archive the release check starts the service with.
       - uses: actions/upload-artifact@v7
         with:
           name: occupancy-service-box-files
@@ -173,6 +181,12 @@ jobs:
           for digest in *; do refs+=("$IMAGE@sha256:$digest"); done
           docker buildx imagetools create -t "$IMAGE:$COMMIT" "${refs[@]}"
           docker buildx imagetools inspect "$IMAGE:$COMMIT"
+          platforms=$(docker buildx imagetools inspect "$IMAGE:$COMMIT" --format '{{json .Manifest}}' \
+            | jq -r '[.manifests[].platform | "\(.os)/\(.architecture)"] | sort | unique | join(" ")')
+          [[ " $platforms " == *" linux/amd64 "* && " $platforms " == *" linux/arm64 "* ]] || {
+            echo "$IMAGE:$COMMIT holds $platforms, not linux/amd64 and linux/arm64" >&2
+            exit 1
+          }
 
   # Both digests, whether built here or already there.
   digests:

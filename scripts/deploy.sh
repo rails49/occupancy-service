@@ -8,8 +8,8 @@
 #   scripts/deploy.sh <user>@<box> [<branch>]
 #
 # One ssh, to the clone at ~/occupancy-service on the box. It brings the clone
-# to the head of the branch, main by default, and refuses a clone that is not
-# clean: its images would be named by a commit that is not what was built.
+# to the head of the branch, main by default, refuses a clone that is not
+# clean, and builds and starts both images under the commit.
 set -euo pipefail
 
 box=${1:?usage: scripts/deploy.sh <user>@<box> [<branch>]}

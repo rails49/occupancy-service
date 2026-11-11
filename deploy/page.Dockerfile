@@ -19,8 +19,8 @@ RUN pnpm --filter @occupancy/ui build
 
 FROM nginx:stable-alpine
 
-# This repository's commit, which compose.yaml passes. It fixes OCCUPANCY_COMMIT.
-# Empty for a build that names none.
+# This repository's commit, which compose.yaml passes. Empty for a build that
+# names none.
 ARG OCCUPANCY_SERVICE_COMMIT=
 LABEL org.opencontainers.image.revision=$OCCUPANCY_SERVICE_COMMIT
 
