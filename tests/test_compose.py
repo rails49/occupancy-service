@@ -127,6 +127,11 @@ def test_the_service_dials_the_broker_and_runs_two_profiles(project: dict[str, A
     ]
 
 
+def test_the_service_pauses_on_controls_track_power(project: dict[str, Any]) -> None:
+    command = project["services"]["service"]["command"]
+    assert "--power-topic=tc49/layout/state/power" in command
+
+
 def test_the_archive_is_bound_read_write_as_the_person(project: dict[str, Any]) -> None:
     service = project["services"]["service"]
     archive = [v for v in service["volumes"] if v["source"] == "/srv/layout.r49"]

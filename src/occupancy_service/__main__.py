@@ -17,6 +17,7 @@ from classifier.runtime import Engine
 
 from occupancy_service.capture import Capture, CaptureSettings
 from occupancy_service.l1 import L1Loop, L1Settings
+from occupancy_service.power import PowerGate, PowerSettings
 from occupancy_service.profile import ProfileError
 from occupancy_service.publisher import Publisher, PublisherSettings
 from occupancy_service.server import LiveServer, ServerSettings
@@ -77,6 +78,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--detector-engine", help="what runs the detector's model")
     parser.add_argument("--detector-device", help="the device that engine runs it on")
+    parser.add_argument(
+        "--power-topic",
+        help="control's track power row on the broker: scoring pauses while it reads off",
+    )
     return parser
 
 
@@ -127,9 +132,16 @@ def _built(args: argparse.Namespace) -> tuple[Capture, L1Loop, Publisher, LiveSe
 def _serve(args: argparse.Namespace) -> None:
     """Runs the parts until a signal raises ``KeyboardInterrupt``."""
     capture, loop, publisher, server = _built(args)
+    gate = (
+        None
+        if args.power_topic is None
+        else PowerGate(PowerSettings(args.power_topic, *args.broker), loop)
+    )
     try:
         capture.start()
         loop.start()
+        if gate is not None:
+            gate.start()
         publisher.start()
         server.start()
         _log.info("serving %s on port %d", args.archive, server.port)
@@ -139,6 +151,8 @@ def _serve(args: argparse.Namespace) -> None:
         # A second signal must not cut this short, or it would leave ffmpeg behind.
         for number in (signal.SIGTERM, signal.SIGINT):
             signal.signal(number, signal.SIG_IGN)
+        if gate is not None:
+            gate.stop()
         server.stop()
         publisher.stop()  # While the loop runs, as it reads the sensors for ``service stopped``.
         loop.stop()
