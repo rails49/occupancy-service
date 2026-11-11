@@ -416,12 +416,11 @@ def _is_detector(value: Any) -> bool:
         return False
     if value.get("state") == "failed":
         return _is_text(value.get("reason"))
-    return value.get("state") == "ok" and all(
-        _is_text(value[key]) for key in ("engine", "device") if key in value
-    )
+    return value.get("state") == "ok" and _is_classifier(value)
 
 
 def _is_classifier(value: Any) -> bool:
+    """``engine`` and ``device``, as ``classifier`` and an ``ok`` detector give them."""
     return (
         isinstance(value, dict) and _is_text(value.get("engine")) and _is_text(value.get("device"))
     )

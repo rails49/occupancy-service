@@ -74,7 +74,7 @@ Everything except `l0`, `detector`, `classifier`, `drift`, `last_messages` and t
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
 | `l0` | object | The newest L0 that is fresh enough to count. See [L0](#l0). |
-| `detector` | object | Whether the detector loaded: `{ "state": "ok", "engine": <string>, "device": <string> }`, or `{ "state": "failed", "reason": <non-empty string> }`. `engine` and `device` are what the detector runs on, each a non-empty string. `device` is absent when the detector was given none. Present only on a service set up to run one. |
+| `detector` | object | Whether the detector loaded: `{ "state": "ok", "engine": <string>, "device": <string> }`, or `{ "state": "failed", "reason": <non-empty string> }`. `engine` and `device` are what the detector runs on, each a non-empty string. Present only on a service set up to run one. |
 | `classifier` | object | What the classifier runs on: `{ "engine": <string>, "device": <string> }`, both non-empty. Absent while no model has loaded. |
 | `scores` | object | Sensor id to P(occupied), from 0 to 1. |
 | `threshold` | number from 0 to 1 | The number a score is compared with. |

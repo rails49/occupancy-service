@@ -368,7 +368,7 @@ def test_latest_names_l0s_own_frame_when_the_detector_is_slower(tmp_path: Path) 
         ],
     }
     assert fields["l1"] == {"s1": {"state": "occupied", "confidence": 0.7}}
-    assert fields["detector"] == {"state": "ok"}
+    assert fields["detector"]["state"] == "ok"
     assert fields["timings"]["detect_ms"] >= 0
     assert fields["timings"]["l0_rate_fps"] == 0
     assert fields["timings"]["l0_age_ms"] >= 0
@@ -410,6 +410,18 @@ def test_latest_has_no_detector_and_no_l0_with_no_model_path(tmp_path: Path) -> 
     assert "detector" not in fields
     assert "l0" not in fields
     assert not {"detect_ms", "l0_rate_fps", "l0_age_ms"} & fields["timings"].keys()
+
+
+def test_latest_names_the_cpu_for_a_detector_on_onnxruntime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "openvino", None)  # import openvino raises ImportError.
+    with live(folder_archive(tmp_path), {"s1": 0.1}, detector=FakeDetector()) as service:
+        wait_until_served(service, service.source.show())
+        fields = read_latest(service).fields
+        assert check(service.base) == []
+
+    assert fields["detector"] == {"state": "ok", "engine": "onnxruntime", "device": "CPU"}
 
 
 def test_latest_says_the_detector_failed_with_the_package_not_installed(

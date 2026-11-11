@@ -1,5 +1,6 @@
 """Turn the newest frame into L1: read the manifest, decode, cut, score, apply the threshold."""
 
+import functools
 import logging
 import os
 import threading
@@ -129,8 +130,8 @@ class L1Result:
 
 @dataclass(frozen=True)
 class DetectorState:
-    """Whether the detector loaded: ``ok``, with the ``engine`` and ``device`` it runs on where
-    they are known, or ``failed`` with a ``reason``."""
+    """Whether the detector loaded: ``ok``, with the ``engine`` and ``device`` it runs on, or
+    ``failed`` with a ``reason``."""
 
     state: Literal["ok", "failed"]
     reason: str | None = None
@@ -278,6 +279,10 @@ class _Scored:
     wrong_frame_size: bool = False
 
 
+def _stand_in(detector: Detector, engine: str, device: str | None) -> Detector:
+    return detector
+
+
 def combine(entry: L1Entry, detector: DetectorSays | None) -> L1Entry:
     """One sensor's L1 from the classifier's ``entry`` and what the detector says, None with no
     fresh L0 or with the sensor outside the frame. The README's table states the rules."""
@@ -333,7 +338,8 @@ class L1Loop:
         model the settings name loads in ``start()``.
 
         ``scorer`` stands in for the model the settings name, and ``make_drift_check`` for the
-        drift check. ``detector`` stands in for the detector model the settings name.
+        drift check. ``detector`` stands in for the detector model the settings name, and is
+        reported as running where the settings would run that model.
         """
         self._settings = settings
         self._source = source
@@ -476,24 +482,28 @@ class L1Loop:
     def _start_detector(self) -> None:
         """Loads the detector once, as the model loads, and starts its loop. A detector that does
         not load is reported, and L1 comes from the classifier alone."""
-        model = self._settings.detector_model
-        state = DetectorState("ok")
-        if self._detector is None and model is not None:
-            try:
-                self._detector, choice = engine_choice.choose_detector(
-                    self._settings.detector_engine,
-                    self._settings.detector_device,
-                    engine_choice.openvino_imports,
-                    lambda engine, device: detector_model.load(model, engine, device),
-                )
-            except detector_model.DetectorUnavailable as error:
-                _log.error("no L0: %s", error)
-                self._detector_state = DetectorState("failed", str(error))
-                return
-            state = DetectorState("ok", engine=choice.engine, device=choice.device)
-        if self._detector is None:
+        given, model = self._detector, self._settings.detector_model
+        if given is not None:
+            load = functools.partial(_stand_in, given)
+        elif model is not None:
+            load = functools.partial(detector_model.load, model)
+        else:
             return
-        self._detector_state = state
+        try:
+            self._detector, choice = engine_choice.choose_detector(
+                self._settings.detector_engine,
+                self._settings.detector_device,
+                engine_choice.openvino_imports,
+                load,
+            )
+        except detector_model.DetectorUnavailable as error:
+            _log.error("no L0: %s", error)
+            self._detector_state = DetectorState("failed", str(error))
+            return
+        # rails49-detector runs on the CPU when given no device.
+        self._detector_state = DetectorState(
+            "ok", engine=choice.engine, device=choice.device or "CPU"
+        )
         if self._l0_loop is None:
             self._l0_loop = L0Loop(
                 self._detector, self._frames, self._l0_view, self._settings.detect_every

@@ -123,7 +123,7 @@ def test_a_car_the_detector_finds_makes_a_clear_sensor_occupied(tmp_path: Path) 
     assert result.l1 == {"s1": L1Entry("occupied", confidence=0.7), "s2": L1Entry("clear")}
     assert result.l0 is not None and result.l0.frame == frame
     assert detector.dpts == [pytest.approx(16.494, abs=0.001)]
-    assert stats.detector == DetectorState("ok")
+    assert stats.detector is not None and stats.detector.state == "ok"
     assert stats.l0 is not None and stats.l0.detect_ms is not None and stats.l0.age_ms is not None
 
 
@@ -179,7 +179,7 @@ def test_a_hung_detector_leaves_the_classifier_running_and_its_l0_ends_at_the_li
     assert result.l0 is None
     assert result.l1["s1"] == L1Entry("clear")
     assert stats.l0 is not None and stats.l0.age_ms is not None and stats.l0.age_ms > 500
-    assert stats.detector == DetectorState("ok")
+    assert stats.detector is not None and stats.detector.state == "ok"
 
 
 def test_a_detector_that_raises_leaves_its_l0_to_end_at_the_limit(tmp_path: Path) -> None:
@@ -196,7 +196,7 @@ def test_a_detector_that_raises_leaves_its_l0_to_end_at_the_limit(tmp_path: Path
         stats = loop.stats()
 
     assert stale.l1["s1"] == L1Entry("clear")
-    assert stats.detector == DetectorState("ok")
+    assert stats.detector is not None and stats.detector.state == "ok"
 
 
 def test_a_reload_changes_the_next_l1_with_no_new_detector_run(tmp_path: Path) -> None:
@@ -388,7 +388,7 @@ def test_the_default_settings_run_openvino_on_the_cpu_or_onnxruntime_with_no_dev
         stats = loop.stats()
 
     assert made == [expected]
-    assert stats.detector == DetectorState("ok", engine=expected[0], device=expected[1])
+    assert stats.detector == DetectorState("ok", engine=expected[0], device="CPU")
     assert result.l1["s1"] == L1Entry("occupied", confidence=0.75)
 
 

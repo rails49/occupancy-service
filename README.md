@@ -41,7 +41,7 @@ This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stder
 - Else OpenVINO on `CPU`, when `openvino` imports.
 - Else onnxruntime on `CPU`.
 
-For the detector, OpenVINO on `CPU` when `openvino` imports, else onnxruntime with no device. It never tries the GPU, which rails49/occupancy-service#13 measures. An explicit `--detector-device=GPU` still works.
+For the detector, OpenVINO on `CPU` when `openvino` imports, else onnxruntime with no device. `latest` reports that as `CPU`, where `rails49-detector` runs a model given no device. It never tries the GPU, which rails49/occupancy-service#13 measures. An explicit `--detector-device=GPU` still works.
 
 One log line at start names the classifier's engine and device, with the error when it did not load on a listed GPU. Another names the detector's, when one loads. `latest` reports them in [`classifier` and `detector`](LIVE.md#optional-fields).
 

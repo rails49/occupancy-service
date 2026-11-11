@@ -393,8 +393,7 @@ def _l0(l0: L0, run_id: str) -> dict[str, Any]:
 def _detector(detector: DetectorState) -> dict[str, Any]:
     if detector.state == "failed":
         return {"state": "failed", "reason": detector.reason}
-    runs_on = {"engine": detector.engine, "device": detector.device}
-    return {"state": "ok", **{key: value for key, value in runs_on.items() if value is not None}}
+    return {"state": "ok", "engine": detector.engine, "device": detector.device}
 
 
 def _last_messages(
