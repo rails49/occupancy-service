@@ -54,7 +54,7 @@ services:
       dockerfile: deploy/page.Dockerfile
       args:
         # The rails49/occupancy commit the page is built from.
-        OCCUPANCY_COMMIT: a74e14db5942caf17bc688bca4fdb7ac830675c1
+        OCCUPANCY_COMMIT: 9533d699c66bc9b1693281896354a5b7d770d6dd
     restart: unless-stopped
     labels:
       - traefik.enable=true
