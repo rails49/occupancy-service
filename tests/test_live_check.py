@@ -229,7 +229,8 @@ def every_optional_field() -> dict[str, Any]:
                 }
             ],
         },
-        "detector": {"state": "ok"},
+        "detector": {"state": "ok", "engine": "openvino", "device": "CPU"},
+        "classifier": {"engine": "openvino", "device": "GPU"},
         "scores": {"C3.A": 0.93, 'say "hi"': 0.02},
         "threshold": 0.5,
         "changes": {"C3.A": 4, 'say "hi"': 0},
@@ -275,6 +276,12 @@ def test_accepts_an_l0_with_no_detections_and_a_failed_detector() -> None:
     assert failures(patched(latest_extra=fields)) == []
 
 
+def test_accepts_a_detector_with_no_engine_or_no_device() -> None:
+    for detector in ({"state": "ok"}, {"state": "ok", "engine": "onnxruntime"}):
+        fields = every_optional_field() | {"detector": detector}
+        assert failures(patched(latest_extra=fields)) == []
+
+
 def test_accepts_the_json_only_answer_with_optional_fields() -> None:
     latest = no_frame_answer() | every_optional_field()
     latest["camera"] = {"state": "lost"}
@@ -302,6 +309,13 @@ def test_accepts_the_json_only_answer_with_optional_fields() -> None:
         ("detector", {"state": "loaded"}),
         ("detector", {"state": "failed"}),
         ("detector", {"state": "failed", "reason": ""}),
+        ("detector", {"state": "ok", "engine": ""}),
+        ("detector", {"state": "ok", "engine": "openvino", "device": 3}),
+        ("classifier", []),
+        ("classifier", {}),
+        ("classifier", {"engine": "openvino"}),
+        ("classifier", {"device": "CPU"}),
+        ("classifier", {"engine": "", "device": "CPU"}),
         ("timings", {"detect_ms": -1}),
         ("timings", {"l0_age_ms": "old"}),
         ("scores", []),

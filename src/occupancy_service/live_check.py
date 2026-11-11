@@ -416,7 +416,15 @@ def _is_detector(value: Any) -> bool:
         return False
     if value.get("state") == "failed":
         return _is_text(value.get("reason"))
-    return value.get("state") == "ok"
+    return value.get("state") == "ok" and all(
+        _is_text(value[key]) for key in ("engine", "device") if key in value
+    )
+
+
+def _is_classifier(value: Any) -> bool:
+    return (
+        isinstance(value, dict) and _is_text(value.get("engine")) and _is_text(value.get("device"))
+    )
 
 
 def _is_last_message(value: Any) -> bool:
@@ -434,6 +442,7 @@ def _is_by_profile(value: Any) -> bool:
 _OPTIONAL: dict[str, Callable[[Any, set[str]], bool]] = {
     "l0": lambda value, _: _is_l0(value),
     "detector": lambda value, _: _is_detector(value),
+    "classifier": lambda value, _: _is_classifier(value),
     "scores": lambda value, sensors: _by_sensor(value, sensors, lambda v: _is_number(v, high=1)),
     "threshold": lambda value, _: _is_number(value, high=1),
     "patches": lambda value, sensors: _by_sensor(value, sensors, _is_patch_part)

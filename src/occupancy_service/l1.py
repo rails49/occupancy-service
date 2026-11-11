@@ -15,7 +15,7 @@ import numpy.typing as npt
 import r49
 from classifier.runtime import Engine
 
-from occupancy_service import detector_model
+from occupancy_service import detector_model, engine_choice
 from occupancy_service.capture import (
     CaptureStatus,
     Frame,
@@ -32,6 +32,7 @@ from occupancy_service.drift import (
     DriftUnmeasured,
     Gray,
 )
+from occupancy_service.engine_choice import Choice, ClassifierEngine
 from occupancy_service.l0 import (
     L0,
     Detector,
@@ -66,13 +67,14 @@ _DETECTOR_MAY_ANSWER = (_NO_TRACK, _NO_MODEL)
 @dataclass(frozen=True)
 class L1Settings:
     """``archive`` is what ``r49.load`` takes as a path. A sensor farther than ``no_track_limit_g``
-    gauges from every track is ``unknown``. ``device`` is as ``classifier.Classifier`` takes it.
+    gauges from every track is ``unknown``. ``engine`` and ``device`` are as
+    ``classifier.Classifier`` takes them, or ``auto``, as ``engine_choice`` picks them.
     Scoring has stalled after ``stalled_after`` seconds with the camera fine and no new result.
     The drift check samples every ``drift_every`` seconds. Every sensor is ``unknown`` past
     ``drift_tolerance_g`` gauges, and None turns the check off.
 
     With ``detector_model`` set, the detector loads from that path, runs on ``detector_engine``
-    and ``detector_device`` (None for ``onnxruntime``, which takes no device), and waits
+    and ``detector_device`` (None for no device, ``auto`` for ``engine_choice``'s), and waits
     ``detect_every`` seconds after each run. A result is combined with the newest L0 no older
     than ``l0_limit`` seconds, and a box is ``margin_g`` gauges longer than its detection at both
     ends. None, the default, imports no detector.
@@ -80,15 +82,15 @@ class L1Settings:
 
     archive: str | os.PathLike[str]
     no_track_limit_g: float = 0.3
-    engine: Engine = "onnxruntime"
-    device: str = "CPU"
+    engine: ClassifierEngine = "auto"
+    device: str = "auto"
     model: Path = classifier.MODEL
     stalled_after: float = 1.0
     drift_every: float = 3.0
     drift_tolerance_g: float | None = 0.5
     detector_model: Path | None = None
-    detector_engine: str = "onnxruntime"
-    detector_device: str | None = None
+    detector_engine: str = "auto"
+    detector_device: str | None = "auto"
     detect_every: float = 1.0
     l0_limit: float = 5.0
     margin_g: float = 2.0
@@ -127,10 +129,13 @@ class L1Result:
 
 @dataclass(frozen=True)
 class DetectorState:
-    """Whether the detector loaded: ``ok``, or ``failed`` with a ``reason``."""
+    """Whether the detector loaded: ``ok``, with the ``engine`` and ``device`` it runs on where
+    they are known, or ``failed`` with a ``reason``."""
 
     state: Literal["ok", "failed"]
     reason: str | None = None
+    engine: str | None = None
+    device: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,7 +146,7 @@ class L1Stats:
     ``capture_ms`` runs from the frame reaching the service to the loop taking it. A time is None
     before any result, and ``cut_ms`` and ``classify_ms`` also when that result was not scored.
     ``l0`` holds the detector's, and ``detector`` whether it loaded. Both are None with no
-    detector.
+    detector. ``classifier`` is where the model the settings name runs, None until it loads.
     """
 
     capture_ms: float | None
@@ -153,6 +158,7 @@ class L1Stats:
     changes: Mapping[str, int]
     l0: L0Stats | None = None
     detector: DetectorState | None = None
+    classifier: Choice | None = None
 
 
 @dataclass(frozen=True)
@@ -184,8 +190,8 @@ class CaptureSource(FrameSource, Protocol):
 class _ClassifierScorer:
     """``classifier.Classifier``, timing the cut and the model apart."""
 
-    def __init__(self, settings: L1Settings) -> None:
-        self._classifier = classifier.Classifier(settings.model, settings.engine, settings.device)
+    def __init__(self, model: Path, engine: Engine, device: str) -> None:
+        self._classifier = classifier.Classifier(model, engine, device)
         self._classify_ms = 0.0
         # score() is one call with no public way to time its two stages, so this wraps the model
         # call inside it. It is why rails49-classifier is pinned.
@@ -335,6 +341,7 @@ class L1Loop:
         self._model_to_load = scorer is None
         self._detector = detector
         self._detector_state: DetectorState | None = None
+        self._classifier_choice: Choice | None = None
         self._l0_loop: L0Loop | None = None
         self._lock = threading.Lock()
         self._paused = False
@@ -463,24 +470,30 @@ class L1Loop:
                 changes=self._changes.counts(),
                 l0=l0_stats,
                 detector=self._detector_state,
+                classifier=self._classifier_choice,
             )
 
     def _start_detector(self) -> None:
         """Loads the detector once, as the model loads, and starts its loop. A detector that does
         not load is reported, and L1 comes from the classifier alone."""
         model = self._settings.detector_model
+        state = DetectorState("ok")
         if self._detector is None and model is not None:
             try:
-                self._detector = detector_model.load(
-                    model, self._settings.detector_engine, self._settings.detector_device
+                self._detector, choice = engine_choice.choose_detector(
+                    self._settings.detector_engine,
+                    self._settings.detector_device,
+                    engine_choice.openvino_imports,
+                    lambda engine, device: detector_model.load(model, engine, device),
                 )
             except detector_model.DetectorUnavailable as error:
                 _log.error("no L0: %s", error)
                 self._detector_state = DetectorState("failed", str(error))
                 return
+            state = DetectorState("ok", engine=choice.engine, device=choice.device)
         if self._detector is None:
             return
-        self._detector_state = DetectorState("ok")
+        self._detector_state = state
         if self._l0_loop is None:
             self._l0_loop = L0Loop(
                 self._detector, self._frames, self._l0_view, self._settings.detect_every
@@ -513,11 +526,18 @@ class L1Loop:
         return {id: combine(entry, says.get(id)) for id, entry in scored.l1.items()}
 
     def _load_scorer(self) -> Scorer | None:
+        model = self._settings.model
         try:
-            return _ClassifierScorer(self._settings)
+            scorer, self._classifier_choice = engine_choice.choose_classifier(
+                self._settings.engine,
+                self._settings.device,
+                engine_choice.openvino_devices,
+                lambda engine, device: _ClassifierScorer(model, engine, device),
+            )
         except Exception:  # What a model or an engine raises is theirs to choose.
             _log.exception("the model did not load")
             return None
+        return scorer
 
     def _geometry_from(self, archive: r49.R49Archive) -> _Geometry:
         return self._geometry_of(archive.manifest)

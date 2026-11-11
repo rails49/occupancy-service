@@ -1,13 +1,15 @@
-# The occupancy service, with OpenVINO and the Intel compute runtime for the GPU.
-# The build context is the repository root.
+# The occupancy service, with OpenVINO, and on amd64 the Intel compute runtime
+# for the GPU. The build context is the repository root.
 #
 # DETECTOR_VERSION, empty by default, installs that version of rails49-detector
 # (AGPL) from PyPI. Empty, the image holds no detector code.
 
 FROM ubuntu:24.04
 
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates ffmpeg intel-opencl-icd ocl-icd-libopencl1 \
+    ca-certificates ffmpeg \
+    $(if [ "$TARGETARCH" = amd64 ]; then echo intel-opencl-icd ocl-icd-libopencl1; fi) \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.6 /uv /usr/local/bin/uv

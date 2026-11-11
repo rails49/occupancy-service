@@ -2,6 +2,7 @@
 
 import json
 import math
+import sys
 import threading
 import time
 from collections.abc import Sequence
@@ -30,6 +31,7 @@ from fake_l1 import (
 )
 
 from occupancy_service.capture import Capture, CaptureSettings, Frame
+from occupancy_service.engine_choice import Choice
 from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Settings, Scoring
 from occupancy_service.l1_changes import L1Change
 
@@ -56,7 +58,9 @@ def test_the_packaged_model_turns_a_frame_into_l1(tmp_path: Path, engine: Engine
 
     with running(L1Loop(L1Settings(archive, engine=engine), source)) as loop:
         result = wait_for(lambda: (r := loop.latest()).frame and r)
+        stats = loop.stats()
 
+    assert stats.classifier == Choice(engine, "CPU")
     assert result.frame == frame
     assert result.archive_id == "archive-1"
     assert result.threshold is not None and 0 < result.threshold < 1
@@ -341,6 +345,29 @@ def test_no_model_when_the_model_does_not_load(tmp_path: Path) -> None:
     assert reasons(result) == {"s1": "no model"}
     assert result.threshold is None
     assert result.frame == frame
+    assert loop.stats().classifier is None
+
+
+def test_with_no_openvino_the_default_settings_run_onnxruntime_on_the_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "openvino", None)  # import openvino raises ImportError.
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    source = FakeSource()
+    frame = source.show()
+
+    with running(L1Loop(L1Settings(archive), source)) as loop:
+        result = served(loop, frame)
+        stats = loop.stats()
+
+    assert stats.classifier == Choice("onnxruntime", "CPU")
+    assert result.l1["s1"].state == "occupied"
+
+
+def test_with_a_scorer_given_no_classifier_is_named(tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    with running(L1Loop(L1Settings(archive), FakeSource(), FakeScorer({"s1": 0.1}))) as loop:
+        assert loop.stats().classifier is None
 
 
 def test_a_frame_that_does_not_decode_is_dropped(tmp_path: Path) -> None:

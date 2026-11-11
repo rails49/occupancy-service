@@ -69,12 +69,13 @@ A classifier's number for a clear sensor goes in the optional `scores`.
 
 ### Optional fields
 
-Everything except `l0`, `detector`, `drift`, `last_messages` and the `timings` of L0 comes from the served frame.
+Everything except `l0`, `detector`, `classifier`, `drift`, `last_messages` and the `timings` of L0 comes from the served frame.
 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |
 | `l0` | object | The newest L0 that is fresh enough to count. See [L0](#l0). |
-| `detector` | object | Whether the detector loaded: `{ "state": "ok" }`, or `{ "state": "failed", "reason": <non-empty string> }`. Present only on a service set up to run one. |
+| `detector` | object | Whether the detector loaded: `{ "state": "ok", "engine": <string>, "device": <string> }`, or `{ "state": "failed", "reason": <non-empty string> }`. `engine` and `device` are what the detector runs on, each a non-empty string. `device` is absent when the detector was given none. Present only on a service set up to run one. |
+| `classifier` | object | What the classifier runs on: `{ "engine": <string>, "device": <string> }`, both non-empty. Absent while no model has loaded. |
 | `scores` | object | Sensor id to P(occupied), from 0 to 1. |
 | `threshold` | number from 0 to 1 | The number a score is compared with. |
 | `patches` | object | Sensor id to the name of a part in this answer, such as `patch-0`, a different part for each sensor. A sensor with no patch has no entry. Sent only in answer to `?patches=1`. |
@@ -142,7 +143,8 @@ Content-Type: application/json
       { "centre": { "x": 412.5, "y": 630 }, "length": 160, "width": 41.5, "angle": 0.02, "class": "passenger", "confidence": 0.88 }
     ]
   },
-  "detector": { "state": "ok" },
+  "detector": { "state": "ok", "engine": "openvino", "device": "CPU" },
+  "classifier": { "engine": "openvino", "device": "GPU" },
   "scores": { "C3.A": 0.93, "C3.B": 0.02 },
   "threshold": 0.5,
   "patches": { "C3.A": "patch-0", "C3.B": "patch-1" },
@@ -329,6 +331,7 @@ It checks format and consistency only, so it does not run the [drift cases](#dri
 | `l1/unknown-confidence` | `unknown` with a `confidence`. |
 | `optional/l0` | `l0` has the wrong shape, or a detection in it does. |
 | `optional/detector` | `detector` has the wrong shape. |
+| `optional/classifier` | `classifier` has the wrong shape. |
 | `optional/scores` | `scores` has the wrong shape, or names a sensor not in the manifest. |
 | `optional/threshold` | `threshold` has the wrong shape. |
 | `optional/patches` | `patches` has the wrong shape, or names a sensor not in the manifest. |

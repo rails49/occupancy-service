@@ -346,22 +346,33 @@ def test_the_package_is_used_through_its_detector_with_the_settings(
 
     with running(L1Loop(settings, source, FakeScorer({"s1": 0.1}))) as loop:
         result = newest(loop, lambda r: r.frame is not None and r.l0 is not None)
+        stats = loop.stats()
 
     assert made == [(model, "openvino", "GPU")]
+    assert stats.detector == DetectorState("ok", engine="openvino", device="GPU")
     assert result.l0 is not None
     assert result.l0.detections == (Detection(160, 120, 50, 31, 0.5, "loco", 0.75),)
     assert result.l1["s1"] == L1Entry("occupied", confidence=0.75)
 
 
-def test_the_default_settings_give_onnxruntime_no_device(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("openvino", "expected"), [(True, ("openvino", "CPU")), (False, ("onnxruntime", None))]
+)
+def test_the_default_settings_run_openvino_on_the_cpu_or_onnxruntime_with_no_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    openvino: bool,
+    expected: tuple[str, str | None],
 ) -> None:
+    if not openvino:
+        monkeypatch.setitem(sys.modules, "openvino", None)  # import openvino raises ImportError.
+    made: list[tuple[str, str | None]] = []
+
     class PackageDetector:  # As rails49-detector's: onnxruntime refuses a device.
-        def __init__(
-            self, model: Path, engine: str = "onnxruntime", device: str | None = None
-        ) -> None:
+        def __init__(self, model: Path, engine: str, device: str | None) -> None:
             if engine == "onnxruntime" and device is not None:
                 raise ValueError("onnxruntime takes no device")
+            made.append((engine, device))
 
         def detect(self, frame: Any, dpt: float) -> list[dict[str, Any]]:
             return [PACKAGE_DETECTION]
@@ -376,7 +387,8 @@ def test_the_default_settings_give_onnxruntime_no_device(
         result = newest(loop, lambda r: r.frame is not None and r.l0 is not None)
         stats = loop.stats()
 
-    assert stats.detector == DetectorState("ok")
+    assert made == [expected]
+    assert stats.detector == DetectorState("ok", engine=expected[0], device=expected[1])
     assert result.l1["s1"] == L1Entry("occupied", confidence=0.75)
 
 
