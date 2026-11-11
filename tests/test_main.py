@@ -478,3 +478,24 @@ def test_sigkill_sends_nothing_more_on_any_profile_and_jmri_keeps_its_retained_s
             assert (kept.payload, kept.retain) == (last[topic], True)
     finally:
         late.close()
+
+
+def test_scoring_pauses_while_the_power_topic_reads_off(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path, broker: Broker
+) -> None:
+    broker.start()
+    topic = "tc49/layout/state/power"
+    publisher = Subscriber(broker.port)
+
+    def reasons(service: Service) -> set[str | None]:
+        return {entry.get("reason") for entry in service.latest()["l1"].values()}
+
+    try:
+        publisher.client.publish(topic, b'{"power": "off"}', qos=1, retain=True).wait_for_publish(5)
+        extra = ("--power-topic", topic)
+        with started(tmp_path, camera, archive, broker.port, *extra) as service:
+            wait_for(lambda: reasons(service) == {"track power off"}, 10)
+            publisher.client.publish(topic, b'{"power": "on"}', qos=1, retain=True)
+            wait_for(lambda: "track power off" not in reasons(service), 10)
+    finally:
+        publisher.close()

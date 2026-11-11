@@ -33,6 +33,7 @@ This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stder
 | `--detector-model` | `L1Settings.detector_model` | None: no detector |
 | `--detector-engine` | `L1Settings.detector_engine` | `onnxruntime` |
 | `--detector-device` | `L1Settings.detector_device` | None: `onnxruntime` takes no device |
+| `--power-topic` | `PowerSettings.topic`, on the `--broker` | None: never [paused](#track-power) |
 
 Each of these refuses the process: it exits 1 with one line on stderr, with no `ffmpeg` started and no port left bound. A flag that argparse refuses, such as a malformed `--broker`, exits 2.
 
@@ -71,6 +72,7 @@ At or above the model's threshold a sensor is `occupied`, and below it `clear`. 
 | `DPT unresolved` | The calibration gives no DPT. |
 | `no track` | The sensor is farther than the limit from every track. |
 | `no frames` | The camera is `lost`, which takes about 1 s without a frame. Nothing is served from before the loss. |
+| `track power off` | Scoring is [paused](#track-power), or has resumed and no result has come yet. |
 | `scoring stalled` | The camera is fine, and for about 1 s no result has come. |
 | `wrong frame size` | The frame does not match `camera.resolution`. |
 | `outside the frame` | The classifier returned `None` for the sensor. |
@@ -101,6 +103,12 @@ The detector says a sensor is occupied when the sensor lies strictly inside a bo
 `drift` stands over all of these, as in [L1](#l1).
 
 The own-vocabulary [profile](#profile-files) publishes each L0 on `occupancy/<archive id>/l0`.
+
+## Track power
+
+With `--power-topic`, `occupancy_service.power` follows control's track power on a connection of its own to the broker, and pauses the `L1Loop` while the newest message there reads `off`. Control publishes it retained, as `{"power": "on" | "draining" | "off", ...}`, on `tc49/layout/state/power`. `on`, `draining`, a message that cannot be read and a lost connection all resume it, so a fault never leaves scoring paused.
+
+While paused, no frame is decoded, scored, given to the detector or checked for drift. `ffmpeg` keeps running and the models stay loaded, so the first result after a resume comes with the next frame. `latest` has no frame part, and until that first result a sensor reads `track power off`, unless a reason above it in [L1](#l1)'s table applies. The profiles keep repeating, so control's timer per sensor gets its reports.
 
 ## Drift
 
@@ -332,7 +340,7 @@ docker compose --env-file /etc/rails49/box.env -f compose.yaml up -d --build
 
 Compose names a missing setting and starts nothing.
 
-The service runs the `occupancy` and `control` profiles, with OpenVINO on the GPU. It restarts unless stopped, so an archive that could not be read is picked up again once it is repaired. The host's `/dev` is mounted, with video devices and the GPU allowed, so a camera that is unplugged and plugged back in appears with no restart.
+The service runs the `occupancy` and `control` profiles, pauses while control's track power is off, with OpenVINO on the GPU. It restarts unless stopped, so an archive that could not be read is picked up again once it is repaired. The host's `/dev` is mounted, with video devices and the GPU allowed, so a camera that is unplugged and plugged back in appears with no restart.
 
 The page can save only to an archive that is a folder named `*.r49`. A zip is served, and refuses saves. To make a folder from a zip:
 

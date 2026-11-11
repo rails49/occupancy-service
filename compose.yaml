@@ -34,6 +34,7 @@ services:
       - --broker=broker:1883
       - --profile=occupancy
       - --profile=control
+      - --power-topic=tc49/layout/state/power
       - --address=0.0.0.0
       - --port=8000
       - --engine=openvino

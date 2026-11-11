@@ -58,6 +58,7 @@ _NO_TRACK = "no track"
 _OUTSIDE_THE_FRAME = "outside the frame"
 _NO_MODEL = "no model"
 _DRIFT = "drift"
+_POWER_OFF = "track power off"
 # The classifier's reasons for ``unknown`` that the detector may answer. Every other one stands.
 _DETECTOR_MAY_ANSWER = (_NO_TRACK, _NO_MODEL)
 
@@ -293,12 +294,25 @@ def _entry(p_occupied: float | None, threshold: float) -> L1Entry:
     return L1Entry("clear")
 
 
+class _Unpaused:
+    """The frames of ``source``, and none while ``paused()``."""
+
+    def __init__(self, source: FrameSource, paused: Callable[[], bool]) -> None:
+        self._source = source
+        self._paused = paused
+
+    def latest(self) -> Frame | None:
+        return None if self._paused() else self._source.latest()
+
+
 class L1Loop:
     """Scores the newest frame on its own thread, skipping one already scored.
 
     A read works from the clock when it is called, and a second thread looks as often for the
     changes that no new result brings, so a scorer that hangs cannot hold up ``scoring stalled``
     or ``no frames``. No lock is held while a frame is scored.
+
+    While ``pause(True)`` stands, the scorer, the detector and the drift check get no frame.
     """
 
     def __init__(
@@ -323,11 +337,18 @@ class L1Loop:
         self._detector_state: DetectorState | None = None
         self._l0_loop: L0Loop | None = None
         self._lock = threading.Lock()
+        self._paused = False
+        # From a pause until the first result after it, L1 reads ``track power off``.
+        self._power_off_shown = False
+        self._frames = _Unpaused(source, lambda: self._paused)
         self._drift = (
             None
             if settings.drift_tolerance_g is None
             else DriftMonitor(
-                settings.drift_every, settings.drift_tolerance_g, source.latest, make_drift_check
+                settings.drift_every,
+                settings.drift_tolerance_g,
+                self._frames.latest,
+                make_drift_check,
             )
         )
         archive = r49.load(settings.archive)
@@ -360,7 +381,7 @@ class L1Loop:
         self._threads = [
             threading.Thread(
                 target=each_new_frame,
-                args=(self._source, self._stopping, self._handle, 0.0),
+                args=(self._frames, self._stopping, self._handle, 0.0),
                 name="l1",
                 daemon=True,
             ),
@@ -392,6 +413,21 @@ class L1Loop:
         with self._lock:
             self._advance()
             return self._changes.subscribe()
+
+    def pause(self, paused: bool) -> None:
+        """``True`` stops scoring, detection and the drift check from the next frame, and drops
+        the result in hand. ``False`` starts them again, with ``scoring stalled`` counted from
+        then. From a pause until the first result after it, a sensor is ``unknown`` with the
+        reason ``track power off``, where the README's table names none before it."""
+        with self._lock:
+            if paused == self._paused:
+                return
+            self._paused = paused
+            if paused:
+                self._scored, self._power_off_shown = None, True
+            else:
+                self._scored_at = time.monotonic()
+            self._advance()
 
     def reload(self) -> None:
         """Read the manifest again, for the next frame to use, and rebuild the drift check. The
@@ -447,7 +483,7 @@ class L1Loop:
         self._detector_state = DetectorState("ok")
         if self._l0_loop is None:
             self._l0_loop = L0Loop(
-                self._detector, self._source, self._l0_view, self._settings.detect_every
+                self._detector, self._frames, self._l0_view, self._settings.detect_every
             )
         self._l0_loop.start()
 
@@ -497,7 +533,10 @@ class L1Loop:
         if scored is not None:
             now = time.monotonic()
             with self._lock:
+                if self._paused:
+                    return  # Scored as the pause came.
                 self._scored, self._scored_at, self._newest_times = scored, now, scored
+                self._power_off_shown = False
                 self._results.add(now)
                 self._advance()
 
@@ -569,6 +608,10 @@ class L1Loop:
         threshold = self._scorer.threshold if self._scorer is not None else None
         if self._camera_ok_since is None:
             live_reason = _NO_FRAMES
+        elif self._paused or (
+            self._power_off_shown and now - self._scored_at <= self._settings.stalled_after
+        ):
+            live_reason = _POWER_OFF
         elif now - max(self._camera_ok_since, self._scored_at) > self._settings.stalled_after:
             live_reason = _SCORING_STALLED
         elif scored is None:
