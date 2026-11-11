@@ -41,9 +41,15 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=rails49
-      - traefik.http.routers.occupancy-live.rule=Host(`occupancy.${BOX_DOMAIN:?start this with --env-file /etc/rails49/box.env}`) && PathPrefix(`/live`)
+      - traefik.http.routers.occupancy-live.rule=Host(`occupancy.${BOX_DOMAIN?start this with --env-file /etc/rails49/box.env}`) && PathPrefix(`/live`)
       - traefik.http.routers.occupancy-live.entrypoints=websecure
       - traefik.http.routers.occupancy-live.tls.certresolver=le
+      # /live over plain HTTP on the UI port, at any host. On a box with no
+      # certificate the router above names an entry point that does not exist;
+      # the door drops it and serves this one.
+      - traefik.http.routers.occupancy-live-http.rule=PathPrefix(`/live`)
+      - traefik.http.routers.occupancy-live-http.entrypoints=occupancy
+      - traefik.http.routers.occupancy-live-http.service=occupancy-live
       - traefik.http.services.occupancy-live.loadbalancer.server.port=8000
     networks:
       - rails49
@@ -59,9 +65,13 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=rails49
-      - traefik.http.routers.occupancy.rule=Host(`occupancy.${BOX_DOMAIN:?start this with --env-file /etc/rails49/box.env}`)
+      - traefik.http.routers.occupancy.rule=Host(`occupancy.${BOX_DOMAIN?start this with --env-file /etc/rails49/box.env}`)
       - traefik.http.routers.occupancy.entrypoints=websecure
       - traefik.http.routers.occupancy.tls.certresolver=le
+      # The page over plain HTTP on the UI port, at any host, as for /live.
+      - traefik.http.routers.occupancy-http.rule=PathPrefix(`/`)
+      - traefik.http.routers.occupancy-http.entrypoints=occupancy
+      - traefik.http.routers.occupancy-http.service=occupancy
       - traefik.http.services.occupancy.loadbalancer.server.port=80
     networks:
       - rails49

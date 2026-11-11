@@ -62,3 +62,12 @@ The organisation's word, owned by its [GLOSSARY.md](https://github.com/rails49/.
 
 **Door**:
 The organisation's word, owned by its [GLOSSARY.md](https://github.com/rails49/.github/blob/main/GLOSSARY.md).
+
+**Box name**:
+`installation`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/installation/blob/main/GLOSSARY.md).
+
+**Box with no certificate**:
+`installation`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/installation/blob/main/GLOSSARY.md).
+
+**UI port**:
+`installation`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/installation/blob/main/GLOSSARY.md).

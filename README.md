@@ -308,6 +308,8 @@ Rocrail does not notice a [dead or hung service](#when-the-service-dies-or-hangs
 
 `compose.yaml` runs the service and the [occupancy page](https://github.com/rails49/occupancy) behind the box's door. Both containers join the installation's `rails49` network and publish no ports. `occupancy.$BOX_DOMAIN` goes to the page, and `/live` on that host goes to the service, with the prefix kept. The page talks to the service on its own origin.
 
+The door also serves both on `occupancy`'s [UI port](https://github.com/rails49/installation#two-kinds-of-box), 8084, over plain HTTP, at any host. On a box with no certificate (`BOX_DOMAIN=`) that is the only way in: `http://<hostname>.local:8084` or `http://<address>:8084`. A box with a box name serves the page on 8084 too.
+
 The installation runs first: it creates the network and runs `broker`, which the service dials on port 1883. Then, from a clone of this repository:
 
 ```sh
@@ -321,7 +323,7 @@ docker compose --env-file /etc/rails49/box.env -f compose.yaml up -d --build
 
 | Setting | Holds | Default |
 | :--- | :--- | :--- |
-| `BOX_DOMAIN` | The box's domain, from `/etc/rails49/box.env` | None |
+| `BOX_DOMAIN` | The box name, from `/etc/rails49/box.env`; empty on a box with no certificate | None |
 | `OCCUPANCY_ARCHIVE` | The archive's path on the box, mounted read-write | None |
 | `OCCUPANCY_CAMERA` | The camera's path, under `/dev/v4l/by-id/` | None |
 | `TC49_UID`, `TC49_GID` | The user and group the service runs as, so the files it saves are the person's | None |
@@ -344,7 +346,7 @@ The page is built from the `rails49/occupancy` commit in `OCCUPANCY_COMMIT` in `
 
 Two steps belong to the box and are not code here:
 
-- An `A` record for the `occupancy` label. The door gets a certificate per router, and holds no wildcard.
+- On a box with a box name, an `A` record for the `occupancy` label. The door gets a certificate per router, and holds no wildcard.
 - `occupancy` in `BOX_UIS` in `/etc/rails49/box.env`, so the installation's page links the UI.
 
 ## Test
