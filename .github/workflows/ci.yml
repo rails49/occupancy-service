@@ -26,8 +26,36 @@ jobs:
           enable-cache: true
 
       # The capture test of the real ffmpeg command line, and the MQTT tests, are skipped without
-      # these.
-      - run: sudo apt-get update && sudo apt-get install --yes ffmpeg mosquitto
+      # these. The packages come from a cache keyed on the runner image, and a hit makes no
+      # network request (#69).
+      - name: cache key, from the runner image
+        id: image
+        run: echo "key=apt-ffmpeg-mosquitto-$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: ffmpeg and mosquitto packages, restored
+        id: debs
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/apt-debs/*.deb
+          key: ${{ steps.image.outputs.key }}
+      - name: ffmpeg and mosquitto
+        id: apt
+        timeout-minutes: 5
+        env:
+          HIT: ${{ steps.debs.outputs.cache-hit }}
+        run: |
+          if [ "$HIT" != true ]; then
+            mkdir -p ~/apt-debs/partial
+            sudo apt-get update
+            sudo apt-get install --yes --download-only -o Dir::Cache::archives="$HOME/apt-debs" \
+              ffmpeg mosquitto
+          fi
+          sudo dpkg -i ~/apt-debs/*.deb
+      - name: ffmpeg and mosquitto packages, saved
+        if: steps.debs.outputs.cache-hit != 'true' && steps.apt.outcome == 'success'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/apt-debs/*.deb
+          key: ${{ steps.image.outputs.key }}
 
       - run: bin/test.sh
 
