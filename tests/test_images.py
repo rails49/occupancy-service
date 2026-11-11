@@ -1,5 +1,5 @@
 """The two images, as built. Each test runs only when its environment variable names a built image:
-CI's `images` job sets them. They need a docker daemon."""
+the `images` workflow sets them for a release. They need a docker daemon."""
 
 import os
 import socket
