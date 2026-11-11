@@ -132,6 +132,11 @@ def test_the_service_pauses_on_controls_track_power(project: dict[str, Any]) -> 
     assert "--power-topic=tc49/layout/state/power" in command
 
 
+def test_the_service_picks_its_engine_and_device(project: dict[str, Any]) -> None:
+    command = project["services"]["service"]["command"]
+    assert [c for c in command if c.startswith(("--engine", "--device"))] == []
+
+
 def test_the_archive_is_bound_read_write_as_the_person(project: dict[str, Any]) -> None:
     service = project["services"]["service"]
     archive = [v for v in service["volumes"] if v["source"] == "/srv/layout.r49"]

@@ -16,6 +16,7 @@ import r49
 from classifier.runtime import Engine
 
 from occupancy_service.capture import Capture, CaptureSettings
+from occupancy_service.engine_choice import AUTO
 from occupancy_service.l1 import L1Loop, L1Settings
 from occupancy_service.power import PowerGate, PowerSettings
 from occupancy_service.profile import ProfileError
@@ -68,16 +69,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--address", help="the address to serve HTTP on")
     parser.add_argument("--port", type=_port, help="the port to serve HTTP on")
-    parser.add_argument("--engine", choices=get_args(Engine), help="what runs the model")
-    parser.add_argument("--device", help="the device the engine runs the model on")
+    parser.add_argument(
+        "--engine", choices=(*get_args(Engine), AUTO), help="what runs the model, or auto"
+    )
+    parser.add_argument("--device", help="the device the engine runs the model on, or auto")
     parser.add_argument("--frame-rate", type=float, help="the frames per second to ask the camera")
     parser.add_argument(
         "--detector-model",
         type=Path,
         help="the detector's model, which needs rails49-detector installed. Absent: no detector",
     )
-    parser.add_argument("--detector-engine", help="what runs the detector's model")
-    parser.add_argument("--detector-device", help="the device that engine runs it on")
+    parser.add_argument("--detector-engine", help="what runs the detector's model, or auto")
+    parser.add_argument("--detector-device", help="the device that engine runs it on, or auto")
     parser.add_argument(
         "--power-topic",
         help="control's track power row on the broker: scoring pauses while it reads off",

@@ -27,13 +27,23 @@ This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stder
 | `--profile`, repeated | `PublisherSettings.profiles` | `occupancy` |
 | `--address` | `ServerSettings.address` | `127.0.0.1` |
 | `--port` | `ServerSettings.port` | `8000` |
-| `--engine` | `L1Settings.engine` | `onnxruntime` |
-| `--device` | `L1Settings.device` | `CPU` |
+| `--engine` | `L1Settings.engine` | `auto` |
+| `--device` | `L1Settings.device` | `auto` |
 | `--frame-rate` | `CaptureSettings.frame_rate` | `20` |
 | `--detector-model` | `L1Settings.detector_model` | None: no detector |
-| `--detector-engine` | `L1Settings.detector_engine` | `onnxruntime` |
-| `--detector-device` | `L1Settings.detector_device` | None: `onnxruntime` takes no device |
+| `--detector-engine` | `L1Settings.detector_engine` | `auto` |
+| `--detector-device` | `L1Settings.detector_device` | `auto` |
 | `--power-topic` | `PowerSettings.topic`, on the `--broker` | None: never [paused](#track-power) |
+
+`auto` lets the service pick, and any other value is used as given. For the classifier:
+
+- OpenVINO on `GPU`, when `openvino` imports, lists a device named `GPU`, and the model loads there. `GPU.0` and `GPU.1` do not count.
+- Else OpenVINO on `CPU`, when `openvino` imports.
+- Else onnxruntime on `CPU`.
+
+For the detector, OpenVINO on `CPU` when `openvino` imports, else onnxruntime with no device. `latest` reports that as `CPU`, where `rails49-detector` runs a model given no device. It never tries the GPU, which rails49/occupancy-service#13 measures. An explicit `--detector-device=GPU` still works.
+
+One log line at start names the classifier's engine and device, with the error when it did not load on a listed GPU. Another names the detector's, when one loads. `latest` reports them in [`classifier` and `detector`](LIVE.md#optional-fields).
 
 Each of these refuses the process: it exits 1 with one line on stderr, with no `ffmpeg` started and no port left bound. A flag that argparse refuses, such as a malformed `--broker`, exits 2.
 
@@ -59,7 +69,7 @@ uv run live-check --save http://localhost:8000/live    # also rewrites manifest.
 
 ## L1
 
-`occupancy_service.l1` turns the newest frame into L1. It reads the archive's manifest, and only the drift check reads an image. `L1Settings` holds the archive's path, the distance from a track past which a sensor has no track (0.3 G), the time until `scoring stalled` (`stalled_after`, 1 s), the [drift check](#drift)'s interval and tolerance, and the engine, device and model, which default to onnxruntime and the model in the `rails49-classifier` wheel. `CaptureSettings` holds the time until the camera is `lost` (`lost_after`, 1 s).
+`occupancy_service.l1` turns the newest frame into L1. It reads the archive's manifest, and only the drift check reads an image. `L1Settings` holds the archive's path, the distance from a track past which a sensor has no track (0.3 G), the time until `scoring stalled` (`stalled_after`, 1 s), the [drift check](#drift)'s interval and tolerance, and the engine, device and model, which default to `auto` and the model in the `rails49-classifier` wheel. `CaptureSettings` holds the time until the camera is `lost` (`lost_after`, 1 s).
 
 The `openvino` engine needs the `openvino` extra (`uv sync --extra openvino`). The dev group holds it too, so the tests run it on the CPU. onnxruntime runs only on the CPU, and any other device reads `no model`.
 
@@ -340,7 +350,7 @@ docker compose --env-file /etc/rails49/box.env -f compose.yaml up -d --build
 
 Compose names a missing setting and starts nothing.
 
-The service runs the `occupancy` and `control` profiles, pauses while control's track power is off, with OpenVINO on the GPU. It restarts unless stopped, so an archive that could not be read is picked up again once it is repaired. The host's `/dev` is mounted, with video devices and the GPU allowed, so a camera that is unplugged and plugged back in appears with no restart.
+The service runs the `occupancy` and `control` profiles, pauses while control's track power is off, with OpenVINO on the GPU when the GPU is there, and on the CPU otherwise. It restarts unless stopped, so an archive that could not be read is picked up again once it is repaired. The host's `/dev` is mounted, with video devices and the GPU allowed, so a camera that is unplugged and plugged back in appears with no restart.
 
 The page can save only to an archive that is a folder named `*.r49`. A zip is served, and refuses saves. To make a folder from a zip:
 
@@ -363,6 +373,6 @@ Two steps belong to the box and are not code here:
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
 
-`tests/test_compose.py` runs `docker compose config` and reads the project it resolves, which needs the docker CLI and no daemon. `tests/test_images.py` runs against built images, and only when `OCCUPANCY_SERVICE_IMAGE` and `OCCUPANCY_PAGE_IMAGE` name them. The `images` workflow builds both when a release is published, the service's without the detector, and sets them.
+`tests/test_compose.py` runs `docker compose config` and reads the project it resolves, which needs the docker CLI and no daemon. `tests/test_images.py` runs against built images, and only when `OCCUPANCY_SERVICE_IMAGE` and `OCCUPANCY_PAGE_IMAGE` name them. The `images` workflow builds both when a release is published, the service's without the detector, and sets them, on an amd64 and an arm64 runner. The service image installs the Intel compute runtime only on amd64.
 
 The L1 tests use a fake capture source and the packaged model, on the CPU. The detector's tests use a fake detector, and the tests of the command a fake `detector` module on the child's path, so no AGPL package is installed. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests of what goes out on the wire run a real `mosquitto`, which they start themselves on a free port, and are skipped when it is not installed. The tests of what the publisher decides run on a test connection, with no broker. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.

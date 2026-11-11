@@ -378,6 +378,11 @@ def _fields(result: L1Result, stats: L1Stats, frame: Frame | None, run_id: str) 
         fields["l0"] = _l0(result.l0, run_id)
     if stats.detector is not None:
         fields["detector"] = _detector(stats.detector)
+    if stats.classifier is not None:
+        fields["classifier"] = {
+            "engine": stats.classifier.engine,
+            "device": stats.classifier.device,
+        }
     return fields
 
 
@@ -388,7 +393,7 @@ def _l0(l0: L0, run_id: str) -> dict[str, Any]:
 def _detector(detector: DetectorState) -> dict[str, Any]:
     if detector.state == "failed":
         return {"state": "failed", "reason": detector.reason}
-    return {"state": "ok"}
+    return {"state": "ok", "engine": detector.engine, "device": detector.device}
 
 
 def _last_messages(

@@ -1,5 +1,5 @@
 # Both images as compose.yaml builds them, the service's without the detector, when a release is
-# published.
+# published, on each architecture's own runner.
 name: images
 
 on:
@@ -11,7 +11,10 @@ permissions:
 
 jobs:
   images:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 

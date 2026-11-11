@@ -9,8 +9,10 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from email.message import Message
+from pathlib import Path
 
 import pytest
+from fake_l1 import write_archive
 
 SERVICE = os.environ.get("OCCUPANCY_SERVICE_IMAGE")
 PAGE = os.environ.get("OCCUPANCY_PAGE_IMAGE")
@@ -52,6 +54,27 @@ def test_the_service_image_holds_no_detector() -> None:
 def test_the_service_image_runs_the_command() -> None:
     assert SERVICE is not None
     assert "--archive" in run("run", "--rm", SERVICE, "--help")
+
+
+@pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
+def test_the_service_image_with_no_gpu_runs_openvino_on_the_cpu(tmp_path: Path) -> None:
+    assert SERVICE is not None
+    archive = write_archive(tmp_path / "archive", {"s1": (160, 120)})
+    mount = f"type=bind,source={archive},target=/archive,readonly"
+    flags = ("--archive=/archive", "--camera=/dev/null", "--broker=127.0.0.1:1")
+    container = run("run", "--rm", "-d", "--mount", mount, SERVICE, *flags).strip()
+    try:
+        logs = ""
+        for _ in range(600):
+            logs = subprocess.run(
+                ["docker", "logs", container], capture_output=True, text=True
+            ).stderr
+            if "the classifier runs on" in logs:
+                break
+            time.sleep(0.1)
+        assert "the classifier runs on openvino CPU\n" in logs, logs
+    finally:
+        run("stop", container)
 
 
 @pytest.fixture

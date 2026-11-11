@@ -135,6 +135,16 @@ def test_conforms_to_the_live_contract(tmp_path: Path, camera: FakeFfmpeg, archi
         assert check(service.base, timeout=5) == []
 
 
+def test_latest_names_the_engine_and_device_of_the_flags(
+    tmp_path: Path, camera: FakeFfmpeg, archive: Path
+) -> None:
+    flags = ("--engine", "openvino", "--device", "CPU")
+    with started(tmp_path, camera, archive, None, *flags) as service:
+        answer = wait_for(lambda: (latest := service.latest()).get("frame_id") and latest, 30)
+    assert answer["classifier"] == {"engine": "openvino", "device": "CPU"}
+    assert "the classifier runs on openvino CPU" in service.stderr.read_text()
+
+
 def test_ffmpeg_is_given_the_size_in_the_manifest_and_the_flags(
     tmp_path: Path, camera: FakeFfmpeg
 ) -> None:
@@ -218,7 +228,7 @@ def test_the_detector_model_flags_give_l0(
     with started(tmp_path, camera, archive, None, *flags) as service:
         answer = wait_for(lambda: (latest := service.latest()).get("l0") and latest, 30)
         assert check(service.base, timeout=5) == []
-    assert answer["detector"] == {"state": "ok"}
+    assert answer["detector"] == {"state": "ok", "engine": "fake", "device": "X"}
     assert answer["l0"]["detections"][0]["class"] == "fake"
 
 
