@@ -1,7 +1,6 @@
 """The engine and device a model runs on, where the settings say ``auto``. The README's Run section
 gives the rules."""
 
-import importlib.util
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -37,7 +36,11 @@ def openvino_devices() -> Sequence[str] | None:
 
 
 def openvino_imports() -> bool:
-    return importlib.util.find_spec("openvino") is not None
+    try:
+        import openvino  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def choose_classifier[Model](
@@ -47,9 +50,9 @@ def choose_classifier[Model](
     load: Callable[[Engine, str], Model],
 ) -> tuple[Model, Choice]:
     """The classifier, loaded by ``load``, and where it runs. ``devices`` is as
-    ``openvino_devices``, and is asked only for an ``auto``. Raises what ``load`` raises, except on
-    a GPU that ``auto`` tried."""
-    listed = devices() if AUTO in (engine, device) else None
+    ``openvino_devices``, and is asked only when it can change the choice. Raises what ``load``
+    raises, except on a GPU that ``auto`` tried."""
+    listed = devices() if engine == AUTO or (engine == "openvino" and device == AUTO) else None
     if engine == AUTO:
         engine = "onnxruntime" if listed is None else "openvino"
     if device != AUTO:

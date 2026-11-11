@@ -88,7 +88,7 @@ def test_an_explicit_device_that_fails_is_not_replaced() -> None:
 
 def test_an_explicit_onnxruntime_with_an_auto_device_runs_on_the_cpu() -> None:
     load = Loads()
-    _, choice = choose_classifier("onnxruntime", "auto", listed(["CPU", "GPU"]), load)
+    _, choice = choose_classifier("onnxruntime", "auto", never_asked, load)
     assert choice == Choice("onnxruntime", "CPU")
     assert load.tried == [("onnxruntime", "CPU")]
 
