@@ -36,6 +36,9 @@ A sensor's new state or new reason, or the first state of a sensor a reload brou
 **L0**:
 `detector`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/detector/blob/main/GLOSSARY.md).
 
+**Installation release**:
+`.github`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/.github/blob/main/GLOSSARY.md).
+
 **Classifier**:
 `occupancy`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/occupancy/blob/main/GLOSSARY.md).
 

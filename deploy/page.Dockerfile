@@ -19,8 +19,10 @@ RUN pnpm --filter @occupancy/ui build
 
 FROM nginx:stable-alpine
 
-ARG OCCUPANCY_COMMIT
-LABEL org.opencontainers.image.revision=$OCCUPANCY_COMMIT
+# This repository's commit, which compose.yaml passes. Empty for a build that
+# names none.
+ARG OCCUPANCY_SERVICE_COMMIT=
+LABEL org.opencontainers.image.revision=$OCCUPANCY_SERVICE_COMMIT
 
 COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /occupancy/ui/dist /usr/share/nginx/html

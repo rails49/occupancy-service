@@ -5,11 +5,14 @@ name: occupancy
 
 services:
   service:
+    # Named by the commit it was built from: scripts/deploy.sh sets it, and a
+    # build with none is `dev` and carries an empty revision.
+    image: ghcr.io/rails49/occupancy-service:${OCCUPANCY_SERVICE_COMMIT:-dev}
     build:
       context: .
       dockerfile: deploy/service.Dockerfile
       args:
-        DETECTOR_VERSION: ${DETECTOR_VERSION:-}
+        OCCUPANCY_SERVICE_COMMIT: ${OCCUPANCY_SERVICE_COMMIT:-}
     restart: unless-stopped
     user: "${TC49_UID:?}:${TC49_GID:?}"
     group_add:
@@ -54,10 +57,12 @@ services:
       - rails49
 
   page:
+    image: ghcr.io/rails49/occupancy-page:${OCCUPANCY_SERVICE_COMMIT:-dev}
     build:
       context: .
       dockerfile: deploy/page.Dockerfile
       args:
+        OCCUPANCY_SERVICE_COMMIT: ${OCCUPANCY_SERVICE_COMMIT:-}
         # The rails49/occupancy commit the page is built from.
         OCCUPANCY_COMMIT: 9533d699c66bc9b1693281896354a5b7d770d6dd
     restart: unless-stopped

@@ -26,6 +26,7 @@ from rails49_testing.subscriber import Received, Subscriber
 from occupancy_service.live_check import check
 
 SENSORS = {"s1": (160.0, 120.0), "s2": (200.0, 120.0)}
+CHECK_ARCHIVE = Path(__file__).resolve().parent.parent / "deploy" / "check.r49"
 OWN = "occupancy/archive-1/sensor/"
 CONTROL = "tc49/layout/sensor"
 START_WAIT = 60  # Seconds for a child to answer: it imports the engine and loads the model.
@@ -182,6 +183,17 @@ def test_an_absent_camera_does_not_refuse_the_process(tmp_path: Path, archive: P
     with started(tmp_path, fake, archive) as service:
         wait_for(lambda: len(fake.starts()) >= 2)  # It goes on trying.
         assert service.latest()["l1"]["s1"] == {"state": "unknown", "reason": "no frames"}
+
+
+def test_the_check_archive_runs_with_no_camera(tmp_path: Path) -> None:
+    (tmp_path / "bin").mkdir()
+    fake = install(tmp_path / "bin", [exits(1)])
+    with started(tmp_path, fake, CHECK_ARCHIVE) as service:
+        wait_for(lambda: len(fake.starts()) >= 2)
+        answer = service.latest()
+    assert answer["camera"]["state"] == "lost"
+    assert answer["l1"]
+    assert all(e == {"state": "unknown", "reason": "no frames"} for e in answer["l1"].values())
 
 
 def test_a_model_that_does_not_load_does_not_refuse_the_process(
