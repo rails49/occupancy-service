@@ -27,6 +27,7 @@ dev = [
     "pyright>=1.1.400",
     "pytest>=8.3",
     "rails49-classifier[openvino]==0.1.0",
+    "rails49-testing",
     "ruff>=0.11",
 ]
 
@@ -50,3 +51,6 @@ select = ["E", "F", "I", "UP", "B"]
 include = ["src", "tests"]
 venvPath = "."
 venv = ".venv"
+
+[tool.uv.sources]
+rails49-testing = { git = "https://github.com/rails49/testing", branch = "main" }

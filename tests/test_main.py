@@ -19,7 +19,9 @@ from typing import Any
 import pytest
 from fake_ffmpeg import HANG, FakeFfmpeg, exits, install, stream
 from fake_l1 import HEIGHT, WIDTH, jpeg, wait_for, write_archive
-from mqtt_broker import Broker, Received, Subscriber, mosquitto
+from rails49_testing.broker import Broker, mosquitto, no_broker
+from rails49_testing.ports import free_port
+from rails49_testing.subscriber import Received, Subscriber
 
 from occupancy_service.live_check import check
 
@@ -28,12 +30,6 @@ OWN = "occupancy/archive-1/sensor/"
 CONTROL = "tc49/layout/sensor"
 START_WAIT = 60  # Seconds for a child to answer: it imports the engine and loads the model.
 STOP_WAIT = 30  # Seconds for a child to exit once signalled.
-
-
-def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
 
 
 @dataclass
@@ -372,10 +368,9 @@ def test_a_second_signal_does_not_cut_the_stop_short(
 @pytest.fixture
 def broker(tmp_path: Path) -> Iterator[Broker]:
     """A real broker, not yet started."""
-    binary = mosquitto()
-    if binary is None:
-        pytest.skip("mosquitto is not installed")
-    broker = Broker(binary, tmp_path)
+    if mosquitto() is None:
+        no_broker("no mosquitto installed")
+    broker = Broker(tmp_path)
     yield broker
     broker.stop()
 

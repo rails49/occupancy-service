@@ -17,9 +17,9 @@ from fake_l1 import (
     wait_for,
     write_archive,
 )
-from mqtt_broker import Broker, mosquitto
 from paho.mqtt import client as paho
 from paho.mqtt.enums import CallbackAPIVersion
+from rails49_testing.broker import Broker
 
 from occupancy_service.l1 import L1Entry, L1Loop, L1Result, L1Settings
 from occupancy_service.power import PowerGate, PowerSettings, is_off
@@ -185,17 +185,6 @@ class Pauses:
 
     def pause(self, paused: bool) -> None:
         self.paused = paused
-
-
-@pytest.fixture
-def broker(tmp_path: Path) -> Iterator[Broker]:
-    binary = mosquitto()
-    if binary is None:
-        pytest.skip("mosquitto is not installed")
-    broker = Broker(binary, tmp_path)
-    broker.start()
-    yield broker
-    broker.stop()
 
 
 def publish(broker: Broker, payload: bytes) -> None:

@@ -2,7 +2,6 @@
 the `images` workflow sets them for a release. They need a docker daemon."""
 
 import os
-import socket
 import subprocess
 import time
 import urllib.error
@@ -13,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from fake_l1 import write_archive
+from rails49_testing.ports import free_port
 
 SERVICE = os.environ.get("OCCUPANCY_SERVICE_IMAGE")
 PAGE = os.environ.get("OCCUPANCY_PAGE_IMAGE")
@@ -81,9 +81,7 @@ def test_the_service_image_with_no_gpu_runs_openvino_on_the_cpu(tmp_path: Path) 
 def page() -> Iterator[str]:
     """The page's container, on a free port of this host."""
     assert PAGE is not None
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    port = free_port()
     container = run("run", "--rm", "-d", "-p", f"127.0.0.1:{port}:80", PAGE).strip()
     try:
         base = f"http://127.0.0.1:{port}"
