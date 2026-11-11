@@ -1,36 +1,200 @@
-# Both images as compose.yaml builds them, the service's without the detector, when a release is
-# published, on each architecture's own runner.
+# Both images at one commit, each built on an amd64 and an arm64 runner, tested, pushed by digest
+# and joined under ghcr.io/rails49/occupancy-<role>:<commit>. An image already there for the
+# commit is not built again. The installation's release workflow calls this (rails49/.github#71).
 name: images
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      commit:
+        description: The occupancy-service commit to build
+        required: true
+        type: string
+    outputs:
+      occupancy-service:
+        description: The service image's digest
+        value: ${{ jobs.digests.outputs.service }}
+      occupancy-page:
+        description: The page image's digest
+        value: ${{ jobs.digests.outputs.page }}
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The occupancy-service commit to build
+        required: true
+        type: string
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
-  images:
-    strategy:
-      matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
+  # The full commit, the images not yet pushed for it, and the box files.
+  commit:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+      missing: ${{ steps.missing.outputs.missing }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          repository: rails49/occupancy-service
+          ref: ${{ inputs.commit }}
+
+      - id: commit
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - id: missing
+        env:
+          COMMIT: ${{ steps.commit.outputs.commit }}
+        run: |
+          missing=()
+          for role in service page; do
+            docker buildx imagetools inspect "ghcr.io/rails49/occupancy-$role:$COMMIT" \
+              > /dev/null 2>&1 || missing+=("\"$role\"")
+          done
+          echo "missing=[$(IFS=,; echo "${missing[*]}")]" >> "$GITHUB_OUTPUT"
+
+      # compose.yaml and the archive the release check starts the service with. The service
+      # mounts no other file of this repository.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: occupancy-service-box-files
+          path: |
+            compose.yaml
+            deploy/check.r49
+
+  build:
+    needs: commit
+    if: needs.commit.outputs.missing != '[]'
+    strategy:
+      matrix:
+        role: ${{ fromJSON(needs.commit.outputs.missing) }}
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      COMMIT: ${{ needs.commit.outputs.commit }}
+      ROLE: ${{ matrix.role }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: rails49/occupancy-service
+          ref: ${{ needs.commit.outputs.commit }}
 
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           version: "0.12.6"
           enable-cache: true
 
-      - run: |
-          docker build -f deploy/service.Dockerfile -t occupancy-service:ci .
-          commit=$(docker compose -f compose.yaml config --format json --no-interpolate \
-            | jq -r .services.page.build.args.OCCUPANCY_COMMIT)
-          docker build -f deploy/page.Dockerfile --build-arg "OCCUPANCY_COMMIT=$commit" \
-            -t occupancy-page:ci .
+      - uses: docker/setup-buildx-action@v4.4.1
 
-      - run: uv run pytest -q tests/test_images.py
+      - uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # The page is built from the rails49/occupancy commit that compose.yaml names.
+      - id: args
+        run: |
+          {
+            echo "args<<EOF"
+            echo "OCCUPANCY_SERVICE_COMMIT=$COMMIT"
+            if [ "$ROLE" = page ]; then
+              docker compose -f compose.yaml config --format json --no-interpolate \
+                | jq -r '"OCCUPANCY_COMMIT=" + .services.page.build.args.OCCUPANCY_COMMIT'
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: deploy/${{ matrix.role }}.Dockerfile
+          build-args: ${{ steps.args.outputs.args }}
+          load: true
+          tags: occupancy-${{ matrix.role }}:ci
+
+      - run: |
+          export "OCCUPANCY_${ROLE^^}_IMAGE=occupancy-$ROLE:ci" OCCUPANCY_SERVICE_COMMIT="$COMMIT"
+          uv run pytest -q tests/test_images.py
+
+      # The same build again, from the cache, pushed with no tag.
+      - id: push
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: deploy/${{ matrix.role }}.Dockerfile
+          build-args: ${{ steps.args.outputs.args }}
+          outputs: type=image,name=ghcr.io/rails49/occupancy-${{ matrix.role }},push-by-digest=true,name-canonical=true,push=true
+
+      - env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: mkdir digests && touch "digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: occupancy-${{ matrix.role }}-digest-${{ runner.arch }}
+          path: digests/*
+
+  join:
+    needs: [commit, build]
+    strategy:
+      matrix:
+        role: ${{ fromJSON(needs.commit.outputs.missing) }}
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: ghcr.io/rails49/occupancy-${{ matrix.role }}
+      COMMIT: ${{ needs.commit.outputs.commit }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: occupancy-${{ matrix.role }}-digest-*
+          path: digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4.4.1
+
+      - uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - working-directory: digests
+        run: |
+          refs=()
+          for digest in *; do refs+=("$IMAGE@sha256:$digest"); done
+          docker buildx imagetools create -t "$IMAGE:$COMMIT" "${refs[@]}"
+          docker buildx imagetools inspect "$IMAGE:$COMMIT"
+
+  # Both digests, whether built here or already there.
+  digests:
+    needs: [commit, join]
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-24.04
+    outputs:
+      service: ${{ steps.digests.outputs.service }}
+      page: ${{ steps.digests.outputs.page }}
+    steps:
+      - uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - id: digests
         env:
-          OCCUPANCY_SERVICE_IMAGE: occupancy-service:ci
-          OCCUPANCY_PAGE_IMAGE: occupancy-page:ci
+          COMMIT: ${{ needs.commit.outputs.commit }}
+        run: |
+          for role in service page; do
+            digest=$(docker buildx imagetools inspect "ghcr.io/rails49/occupancy-$role:$COMMIT" \
+              --format '{{json .Manifest}}' | jq -r .digest)
+            echo "$role=$digest" >> "$GITHUB_OUTPUT"
+          done

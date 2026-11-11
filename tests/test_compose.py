@@ -145,11 +145,26 @@ def test_the_archive_is_bound_read_write_as_the_person(project: dict[str, Any]) 
     assert service["user"] == "1000:1000"
 
 
-def test_the_service_image_has_no_detector_unless_asked(project: dict[str, Any]) -> None:
-    assert project["services"]["service"]["build"]["args"] == {"DETECTOR_VERSION": ""}
-    done = config({**SETTINGS, "DETECTOR_VERSION": "0.0.2"})
-    args = json.loads(done.stdout)["services"]["service"]["build"]["args"]
-    assert args == {"DETECTOR_VERSION": "0.0.2"}
+@pytest.mark.parametrize("container", ["service", "page"])
+def test_a_local_build_is_named_dev_with_no_revision(
+    project: dict[str, Any], container: str
+) -> None:
+    service = project["services"][container]
+    assert service["image"] == f"ghcr.io/rails49/occupancy-{container}:dev"
+    assert service["build"]["args"]["OCCUPANCY_SERVICE_COMMIT"] == ""
+
+
+@pytest.mark.parametrize("container", ["service", "page"])
+def test_a_build_at_a_commit_is_named_by_it_and_carries_it(container: str) -> None:
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    done = config({**SETTINGS, "OCCUPANCY_SERVICE_COMMIT": commit})
+    service = json.loads(done.stdout)["services"][container]
+    assert service["image"] == f"ghcr.io/rails49/occupancy-{container}:{commit}"
+    assert service["build"]["args"]["OCCUPANCY_SERVICE_COMMIT"] == commit
+
+
+def test_the_commit_fixes_the_detector_version(project: dict[str, Any]) -> None:
+    assert "DETECTOR_VERSION" not in project["services"]["service"]["build"]["args"]
 
 
 @pytest.mark.parametrize("missing", list(SETTINGS))

@@ -1,0 +1,26 @@
+{
+  "version": 4,
+  "id": "check",
+  "layout": {
+    "scale": "HO",
+    "calibration": {
+      "points": [
+        { "px": { "x": 10, "y": 10 }, "world": { "x": 0, "y": 0, "z": 0 } },
+        { "px": { "x": 110, "y": 10 }, "world": { "x": 100, "y": 0, "z": 0 } }
+      ]
+    },
+    "sensors": [
+      { "id": "s1", "x": 160, "y": 120 },
+      { "id": "s2", "x": 200, "y": 120 }
+    ],
+    "tracks": [
+      {
+        "nodes": [
+          { "x": 0, "y": 120, "heading": 0 },
+          { "x": 320, "y": 120, "heading": 0 }
+        ]
+      }
+    ]
+  },
+  "camera": { "resolution": { "width": 320, "height": 240 } }
+}

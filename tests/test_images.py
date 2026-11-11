@@ -1,7 +1,10 @@
 """The two images, as built. Each test runs only when its environment variable names a built image:
-the `images` workflow sets them for a release. They need a docker daemon."""
+the `images` workflow sets them for a release, with the commit it built them from. They need a
+docker daemon."""
 
+import json
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -9,6 +12,7 @@ import urllib.request
 from collections.abc import Iterator
 from email.message import Message
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fake_l1 import write_archive
@@ -16,6 +20,18 @@ from rails49_testing.ports import free_port
 
 SERVICE = os.environ.get("OCCUPANCY_SERVICE_IMAGE")
 PAGE = os.environ.get("OCCUPANCY_PAGE_IMAGE")
+COMMIT = os.environ.get("OCCUPANCY_SERVICE_COMMIT")
+ROOT = Path(__file__).resolve().parent.parent
+CHECK_ARCHIVE = ROOT / "deploy" / "check.r49"
+CHECK_WAIT = 60  # Seconds the release check waits before it looks: rails49/.github#71 decision 12.
+
+
+def pinned_detector() -> str:
+    """The rails49-detector version the service's Dockerfile pins."""
+    text = (ROOT / "deploy" / "service.Dockerfile").read_text()
+    found = re.search(r"^ARG DETECTOR_VERSION=(\S+)$", text, re.MULTILINE)
+    assert found, "service.Dockerfile pins no detector"
+    return found.group(1)
 
 
 def run(*args: str) -> str:
@@ -44,10 +60,30 @@ def test_rules_reads_a_headers_file() -> None:
 
 
 @pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
-def test_the_service_image_holds_no_detector() -> None:
+def test_the_service_image_holds_the_pinned_detector() -> None:
     assert SERVICE is not None
-    script = "import importlib.util; print(importlib.util.find_spec('detector'))"
-    assert run("run", "--rm", "--entrypoint", "python", SERVICE, "-c", script).strip() == "None"
+    script = "import detector, importlib.metadata as m; print(m.version('rails49-detector'))"
+    found = run("run", "--rm", "--entrypoint", "python", SERVICE, "-c", script).strip()
+    assert found == pinned_detector()
+
+
+@pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
+def test_the_service_image_carries_the_detectors_license_and_source() -> None:
+    assert SERVICE is not None
+    doc = "/usr/share/doc/rails49-detector"
+    text = run("run", "--rm", "--entrypoint", "cat", SERVICE, f"{doc}/LICENSE")
+    assert text.split()[:4] == ["GNU", "AFFERO", "GENERAL", "PUBLIC"]
+    source = run("run", "--rm", "--entrypoint", "cat", SERVICE, f"{doc}/SOURCE").strip()
+    assert source == f"https://github.com/rails49/detector/tree/v{pinned_detector()}"
+
+
+@pytest.mark.skipif(COMMIT is None, reason="OCCUPANCY_SERVICE_COMMIT names no commit")
+@pytest.mark.parametrize("image", [SERVICE, PAGE], ids=["service", "page"])
+def test_each_image_carries_its_commit(image: str | None) -> None:
+    if image is None:
+        pytest.skip("no image of this kind was built")
+    labels = json.loads(run("inspect", "--format", "{{json .Config.Labels}}", image))
+    assert labels["org.opencontainers.image.revision"] == COMMIT
 
 
 @pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
@@ -73,6 +109,40 @@ def test_the_service_image_with_no_gpu_runs_openvino_on_the_cpu(tmp_path: Path) 
                 break
             time.sleep(0.1)
         assert "the classifier runs on openvino CPU\n" in logs, logs
+    finally:
+        run("stop", container)
+
+
+def latest(base: str) -> dict[str, Any]:
+    """The JSON part of ``latest``, which is the first part."""
+    with urllib.request.urlopen(f"{base}/latest", timeout=5) as response:
+        body = response.read()
+        boundary = response.headers.get_boundary()
+    first = body.split(f"--{boundary}".encode())[1]
+    return json.loads(first.partition(b"\r\n\r\n")[2])
+
+
+@pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
+def test_the_service_with_no_camera_and_the_check_archive_keeps_running() -> None:
+    assert SERVICE is not None
+    port = free_port()
+    mount = f"type=bind,source={CHECK_ARCHIVE},target=/archive.r49"
+    flags = (
+        "--archive=/archive.r49",
+        "--camera=/dev/v4l/by-id/no-camera",
+        "--broker=127.0.0.1:1",
+        "--address=0.0.0.0",
+    )
+    published = ("-p", f"127.0.0.1:{port}:8000")
+    container = run("run", "--rm", "-d", "--mount", mount, *published, SERVICE, *flags).strip()
+    try:
+        time.sleep(CHECK_WAIT)
+        state = json.loads(run("inspect", "--format", "{{json .State}}", container))
+        assert state["Running"], run("logs", container)
+        answer = latest(f"http://127.0.0.1:{port}/live")
+        assert answer["camera"]["state"] == "lost"
+        assert answer["l1"]
+        assert all(e == {"state": "unknown", "reason": "no frames"} for e in answer["l1"].values())
     finally:
         run("stop", container)
 
