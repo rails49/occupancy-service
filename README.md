@@ -328,26 +328,42 @@ Rocrail does not notice a [dead or hung service](#when-the-service-dies-or-hangs
 
 The door also serves both on `occupancy`'s [UI port](https://github.com/rails49/installation#two-kinds-of-box), 8084, over plain HTTP, at any host. On a box with no certificate (`BOX_DOMAIN=`) that is the only way in: `http://<hostname>.local:8084` or `http://<address>:8084`. A box with a box name serves the page on 8084 too.
 
+The box's settings for this stack are in `/etc/rails49/occupancy.env`, beside `box.env`. It holds no secret, and is written by hand:
+
+```sh
+TC49_UID=1000
+TC49_GID=1000
+VIDEO_GID=44
+RENDER_GID=992
+OCCUPANCY_ARCHIVE=/srv/rails49/layout.r49
+OCCUPANCY_CAMERA=/dev/v4l/by-id/usb-<camera>-video-index0
+```
+
+The stack is started with both files:
+
+```sh
+docker compose --env-file /etc/rails49/box.env --env-file /etc/rails49/occupancy.env \
+  -f compose.yaml up -d
+```
+
 The installation runs first: it creates the network and runs `broker`, which the service dials on port 1883. Then, from a clone of this repository on another machine:
 
 ```sh
-OCCUPANCY_ARCHIVE=/srv/rails49/layout.r49 \
-OCCUPANCY_CAMERA=/dev/v4l/by-id/usb-<camera>-video-index0 \
 scripts/deploy.sh <user>@<box>
 ```
 
-`scripts/deploy.sh` goes over ssh to the clone at `~/occupancy-service` on the box, brings it to the head of `main` (or of the branch given after the box), and refuses a clone that is not clean. It builds both images there and starts them, with the user and groups of the account it logs in as.
+`scripts/deploy.sh` goes over ssh to the clone at `~/occupancy-service` on the box, and stops on a box with no `occupancy.env`. It brings the clone to the head of `main` (or of the branch given after the box), and refuses a clone that is not clean. It builds both images there and starts them with both files.
 
-| Setting | Holds | Default |
-| :--- | :--- | :--- |
-| `BOX_DOMAIN` | The box name, from `/etc/rails49/box.env`; empty on a box with no certificate | None |
-| `OCCUPANCY_ARCHIVE` | The archive's path on the box, mounted read-write | None |
-| `OCCUPANCY_CAMERA` | The camera's path, under `/dev/v4l/by-id/` | None |
-| `TC49_UID`, `TC49_GID` | The user and group the service runs as, so the files it saves are the person's | None |
-| `VIDEO_GID`, `RENDER_GID` | The host's `video` and `render` groups, for the camera and the GPU | None |
-| `OCCUPANCY_SERVICE_COMMIT` | The commit the images are named by and carry as `org.opencontainers.image.revision` | `dev`, and an empty revision |
+| Setting | Holds | Set in | Default |
+| :--- | :--- | :--- | :--- |
+| `BOX_DOMAIN` | The box name; empty on a box with no certificate | `box.env` | None |
+| `OCCUPANCY_ARCHIVE` | The archive's path on the box, mounted read-write | `occupancy.env` | None |
+| `OCCUPANCY_CAMERA` | The camera's path, under `/dev/v4l/by-id/` | `occupancy.env` | None |
+| `TC49_UID`, `TC49_GID` | The user and group the service runs as, so the files it saves are the person's (`id -u`, `id -g`) | `occupancy.env` | None |
+| `VIDEO_GID`, `RENDER_GID` | The host's `video` and `render` groups, for the camera and the GPU (`getent group video`, `getent group render`) | `occupancy.env` | None |
+| `OCCUPANCY_SERVICE_COMMIT` | The commit the images are named by and carry as `org.opencontainers.image.revision` | `scripts/deploy.sh` | `dev`, and an empty revision |
 
-`scripts/deploy.sh` sets all but `BOX_DOMAIN`. Compose names a missing setting and starts nothing.
+Compose names a missing setting and the file it belongs in, and starts nothing.
 
 The images are `ghcr.io/rails49/occupancy-service:<commit>` and `ghcr.io/rails49/occupancy-page:<commit>`, for amd64 and arm64. The `images` workflow builds and publishes them when an [installation release](https://github.com/rails49/.github/blob/main/GLOSSARY.md) is made, and a box runs them from one. `scripts/deploy.sh` builds them on the box under the same names.
 
@@ -376,7 +392,7 @@ Two steps belong to the box and are not code here:
 bin/test.sh             # Ruff, Black, Pyright and pytest
 ```
 
-`tests/test_compose.py` runs `docker compose config` and reads the project it resolves, which needs the docker CLI and no daemon. `tests/test_images.py` runs against built images, and only when `OCCUPANCY_SERVICE_IMAGE` and `OCCUPANCY_PAGE_IMAGE` name them, with `OCCUPANCY_SERVICE_COMMIT` for the revision. Its check with no camera waits 60 seconds.
+`tests/test_compose.py` runs `docker compose config` and reads the project it resolves, which needs the docker CLI and no daemon. `tests/test_deploy.py` runs `scripts/deploy.sh` with a fake `ssh` that runs the box's half on this machine, and is skipped where `/etc/rails49/occupancy.env` exists. `tests/test_images.py` runs against built images, and only when `OCCUPANCY_SERVICE_IMAGE` and `OCCUPANCY_PAGE_IMAGE` name them, with `OCCUPANCY_SERVICE_COMMIT` for the revision. Its check with no camera waits 60 seconds.
 
 The `images` workflow (`.github/workflows/images.yml`) takes a commit. The installation's release workflow calls it, and it can be run by hand. For each image not yet on GHCR at that commit, it builds the image on an amd64 and an arm64 runner, runs `tests/test_images.py` against it, pushes it by digest, and joins the two under `:<commit>`. An image already there is not built again. It outputs the full commit as `commit` and both digests, as `occupancy-service` and `occupancy-page`. The caller grants `packages: write`. It uploads `compose.yaml` and `deploy/check.r49` as the artifact `occupancy-service-box-files`. The service image installs the Intel compute runtime only on amd64.
 

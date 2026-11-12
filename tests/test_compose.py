@@ -11,8 +11,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SETTINGS = {
-    "BOX_DOMAIN": "box.example",
+BOX_ENV = {"BOX_DOMAIN": "box.example"}
+
+OCCUPANCY_ENV = {
     "OCCUPANCY_ARCHIVE": "/srv/layout.r49",
     "OCCUPANCY_CAMERA": "/dev/v4l/by-id/usb-camera-video-index0",
     "TC49_UID": "1000",
@@ -21,10 +22,15 @@ SETTINGS = {
     "RENDER_GID": "992",
 }
 
+SETTINGS = BOX_ENV | OCCUPANCY_ENV
 
-def config(settings: dict[str, str]) -> subprocess.CompletedProcess[str]:
+
+def config(
+    settings: dict[str, str], env_files: list[Path] | None = None
+) -> subprocess.CompletedProcess[str]:
+    flags = [arg for path in env_files or [] for arg in ("--env-file", str(path))]
     return subprocess.run(
-        ["docker", "compose", "-f", "compose.yaml", "config", "--format", "json"],
+        ["docker", "compose", *flags, "-f", "compose.yaml", "config", "--format", "json"],
         cwd=ROOT,
         env={**{k: v for k, v in os.environ.items() if k not in SETTINGS}, **settings},
         capture_output=True,
@@ -165,8 +171,28 @@ def test_compose_leaves_the_detector_version_to_the_dockerfile(project: dict[str
     assert "DETECTOR_VERSION" not in project["services"]["service"]["build"]["args"]
 
 
-@pytest.mark.parametrize("missing", list(SETTINGS))
-def test_a_setting_with_no_default_is_named_when_missing(missing: str) -> None:
+@pytest.mark.parametrize(
+    ("missing", "file"),
+    [(k, "/etc/rails49/box.env") for k in BOX_ENV]
+    + [(k, "/etc/rails49/occupancy.env") for k in OCCUPANCY_ENV],
+)
+def test_a_setting_with_no_default_is_named_with_its_file_when_missing(
+    missing: str, file: str
+) -> None:
     done = config({k: v for k, v in SETTINGS.items() if k != missing})
     assert done.returncode != 0
     assert missing in done.stderr
+    assert file in done.stderr
+
+
+def test_the_box_env_and_occupancy_env_hold_every_setting(tmp_path: Path) -> None:
+    files = []
+    for name, settings in [("box.env", BOX_ENV), ("occupancy.env", OCCUPANCY_ENV)]:
+        path = tmp_path / name
+        path.write_text("".join(f"{k}={v}\n" for k, v in settings.items()))
+        files.append(path)
+    done = config({}, files)
+    assert done.returncode == 0, done.stderr
+    service = json.loads(done.stdout)["services"]["service"]
+    assert service["user"] == "1000:1000"
+    assert "--camera=/dev/v4l/by-id/usb-camera-video-index0" in service["command"]
