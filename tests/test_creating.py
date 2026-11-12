@@ -112,10 +112,10 @@ def test_a_create_into_a_railroad_with_no_archive_uses_its_name(
     tmp_path: Path, folder: Path
 ) -> None:
     with serving(folder, "{railroad}.r49") as service:
-        service.railroad[0] = "Gleis 49"
+        service.railroad[0] = "Riverton"
         assert service.create(zipped(tmp_path))[0] == 204
-        assert service.loop.archive == folder / "Gleis 49.r49"
-        assert (folder / "Gleis 49.r49" / "manifest.json").is_file()
+        assert service.loop.archive == folder / "Riverton.r49"
+        assert (folder / "Riverton.r49" / "manifest.json").is_file()
 
 
 def test_with_no_railroad_loaded_a_create_is_409(tmp_path: Path, folder: Path) -> None:
@@ -269,8 +269,8 @@ def test_the_checks_come_in_their_order(tmp_path: Path, folder: Path) -> None:
         assert service.send("PUT", CREATE, b"x", Origin=foreign)[0] == 403
         assert service.send("PUT", CREATE, b"x")[0] == 428
         assert service.create(b"x")[0] == 409
-        service.railroad[0] = "Gleis 49"
-        write_archive(folder / "Gleis 49.r49", ONE_SENSOR)
+        service.railroad[0] = "Riverton"
+        write_archive(folder / "Riverton.r49", ONE_SENSOR)
         assert service.create(b"x")[0] == 412
 
 
@@ -324,7 +324,7 @@ def test_the_checker_with_save_passes_with_no_archive_and_creates_nothing(
 
 def test_the_checker_with_save_passes_on_a_created_archive(tmp_path: Path, folder: Path) -> None:
     with serving(folder, "{railroad}.r49") as service:
-        service.railroad[0] = "Gleis 49"
+        service.railroad[0] = "Riverton"
         assert service.create(zipped(tmp_path))[0] == 204
         frame = service.source.show()
         wait_for(lambda: service.loop.latest().frame == frame)

@@ -253,7 +253,7 @@ Serves the archive in the URL form of rails49/r49#60: `<base>/archive/manifest.j
 A service may run with no archive. Then `GET <base>/archive/manifest.json` answers 404 with a JSON body:
 
 ```json
-{"error": "archive/none", "railroad": "Gleis 49"}
+{"error": "archive/none", "railroad": "Riverton"}
 ```
 
 `railroad` is there when the archive's path depends on the loaded railroad. It is the railroad's name, or `null` when none is loaded. With a path that does not depend on it, the answer has no `railroad`. Every other file under `<base>/archive/` is 404, and `PUT` and `DELETE` under it answer 405. A page may [create an archive](#creating-an-archive).

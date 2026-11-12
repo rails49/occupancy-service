@@ -908,12 +908,12 @@ def test_with_no_archive_the_manifest_is_404_with_the_railroad_and_frames_are_se
 ) -> None:
     pattern = str(tmp_path / "{railroad}.r49")
     with live(
-        tmp_path / "Gleis 49.r49", {}, railroad=lambda: "Gleis 49", pattern=pattern
+        tmp_path / "Riverton.r49", {}, railroad=lambda: "Riverton", pattern=pattern
     ) as service:
         response = service.get("/live/archive/manifest.json")
         assert response.status == 404
         assert response.headers.get_content_type() == "application/json"
-        assert json.loads(response.read()) == {"error": "archive/none", "railroad": "Gleis 49"}
+        assert json.loads(response.read()) == {"error": "archive/none", "railroad": "Riverton"}
         assert service.get("/live/archive/first.png").status == 404
 
         frame = service.source.show(jpeg(WIDTH * 2, HEIGHT * 2))
@@ -939,7 +939,7 @@ def test_with_no_archive_and_a_path_without_the_railroad_the_answer_names_none(
     tmp_path: Path, pattern: str | None
 ) -> None:
     path = None if pattern is None else str(tmp_path / pattern)
-    with live(tmp_path / "nothing-here", {}, railroad=lambda: "Gleis 49", pattern=path) as service:
+    with live(tmp_path / "nothing-here", {}, railroad=lambda: "Riverton", pattern=path) as service:
         response = service.get("/live/archive/manifest.json")
         assert response.status == 404
         assert json.loads(response.read()) == {"error": "archive/none"}
@@ -955,7 +955,7 @@ def test_the_archive_served_is_the_one_the_loop_opened(tmp_path: Path) -> None:
 
 
 def test_the_checker_passes_with_no_archive_with_the_camera_on_and_off(tmp_path: Path) -> None:
-    with live(tmp_path / "nothing-here", {}, railroad=lambda: "Gleis 49") as service:
+    with live(tmp_path / "nothing-here", {}, railroad=lambda: "Riverton") as service:
         assert check(service.base, timeout=5) == []  # Before any frame.
 
         wait_until_served(service, service.source.show(jpeg(WIDTH * 2, HEIGHT * 2)))

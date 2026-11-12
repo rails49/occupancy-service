@@ -33,13 +33,13 @@ def row(name: Any, at: Any = "t1", **more: Any) -> bytes:
 @pytest.mark.parametrize(
     ("payload", "build"),
     [
-        (row("Gleis 49"), ("Gleis 49", "t1")),
-        (row("Gleis 49", built=True), ("Gleis 49", "t1")),
-        (json.dumps({"name": "Gleis 49"}).encode(), ("Gleis 49", None)),
-        (row("Gleis 49", built=False), None),
+        (row("Riverton"), ("Riverton", "t1")),
+        (row("Riverton", built=True), ("Riverton", "t1")),
+        (json.dumps({"name": "Riverton"}).encode(), ("Riverton", None)),
+        (row("Riverton", built=False), None),
         (row(""), None),
         (row(3), None),
-        (b'["Gleis 49"]', None),
+        (b'["Riverton"]', None),
         (b"{", None),
         (b"\xff", None),
     ],
@@ -51,7 +51,7 @@ def test_a_row_names_a_build_unless_it_names_no_railroad_or_one_not_built(
 
 
 def test_the_name_fills_the_placeholder_and_cannot_leave_the_folder() -> None:
-    assert archive_for("/archives/{railroad}.r49", "Gleis 49") == "/archives/Gleis 49.r49"
+    assert archive_for("/archives/{railroad}.r49", "Riverton") == "/archives/Riverton.r49"
     assert archive_for("/archives/{railroad}.r49", "../etc") is None
 
 

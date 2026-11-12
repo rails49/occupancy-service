@@ -652,7 +652,7 @@ def no_archive(railroad: Any) -> Stub:
     )
 
 
-@pytest.mark.parametrize("railroad", ["Gleis 49", None, UNNAMED])
+@pytest.mark.parametrize("railroad", ["Riverton", None, UNNAMED])
 def test_accepts_a_service_with_no_archive(railroad: Any) -> None:
     assert failures(no_archive(railroad)) == []
 
@@ -674,7 +674,7 @@ def test_save_accepts_a_service_with_an_archive_that_refuses_a_create_with_412()
     assert stub.creates == []
 
 
-@pytest.mark.parametrize("railroad", ["Gleis 49", None])
+@pytest.mark.parametrize("railroad", ["Riverton", None])
 def test_save_with_no_archive_checks_the_create_and_creates_nothing(railroad: Any) -> None:
     stub = no_archive(railroad)
     stub.offers_create = True
@@ -709,13 +709,13 @@ def test_save_refuses_a_create_over_an_archive_it_read() -> None:
 
 
 def test_save_refuses_a_create_that_takes_a_body_that_is_no_zip() -> None:
-    stub = no_archive("Gleis 49")
+    stub = no_archive("Riverton")
     stub.offers_create, stub.checks_zip = True, False
     assert save_rules(stub) == ["create/refused"]
 
 
 def test_save_refuses_a_create_refused_with_no_error_field() -> None:
-    stub = no_archive("Gleis 49")
+    stub = no_archive("Riverton")
     stub.offers_create, stub.no_error_field = True, True
     assert save_rules(stub) == ["create/refused"]
 
@@ -729,7 +729,7 @@ def test_save_makes_no_save_from_a_create() -> None:
 
 @pytest.mark.parametrize(
     ("railroad", "rules"),
-    [(None, []), ("Gleis 49", ["create/refused"]), (UNNAMED, ["create/refused"])],
+    [(None, []), ("Riverton", ["create/refused"]), (UNNAMED, ["create/refused"])],
 )
 def test_save_accepts_409_on_a_create_only_with_no_railroad(
     railroad: Any, rules: list[str]
