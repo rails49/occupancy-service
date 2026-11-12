@@ -547,7 +547,7 @@ def test_the_loaded_railroads_archive_is_opened_and_one_with_none_leaves_none(
 ) -> None:
     archives = tmp_path / "archives"
     archives.mkdir()
-    write_archive(archives / "Gleis 49.r49", SENSORS)
+    write_archive(archives / "Riverton.r49", SENSORS)
     topic = "tc49/layout/state/railroad"
     broker.start()
     publisher = Subscriber(broker.port)
@@ -560,7 +560,7 @@ def test_the_loaded_railroads_archive_is_opened_and_one_with_none_leaves_none(
         return set(service.latest()["l1"])
 
     try:
-        load("Gleis 49", "t1")
+        load("Riverton", "t1")
         pattern = str(archives / "{railroad}.r49")
         with started(tmp_path, camera, pattern, broker.port, "--profile", "control") as service:
             wait_for(lambda: sensors(service) == set(SENSORS), 30)
@@ -570,7 +570,7 @@ def test_the_loaded_railroads_archive_is_opened_and_one_with_none_leaves_none(
             wait_for(lambda: sensors(service) == set(), 10)
             assert manifest_answer(service) == (404, {"error": "archive/none", "railroad": "Empty"})
 
-            load("Gleis 49", "t3")
+            load("Riverton", "t3")
             wait_for(lambda: sensors(service) == set(SENSORS), 10)
     finally:
         publisher.close()
