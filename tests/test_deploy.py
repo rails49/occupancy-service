@@ -17,11 +17,7 @@ def test_a_box_with_no_occupancy_env_stops_with_a_sentence_naming_it(tmp_path: P
     ssh = bin_ / "ssh"
     ssh.write_text('#!/bin/sh\nexec bash -c "$2"\n')
     ssh.chmod(0o755)
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith(("OCCUPANCY_", "TC49_", "VIDEO_", "RENDER_"))
-    }
+    env = {k: v for k, v in os.environ.items() if not k.startswith("OCCUPANCY_")}
     done = subprocess.run(
         [str(ROOT / "scripts" / "deploy.sh"), "user@box"],
         env=env | {"HOME": str(tmp_path), "PATH": f"{bin_}{os.pathsep}{env['PATH']}"},

@@ -354,16 +354,16 @@ scripts/deploy.sh <user>@<box>
 
 `scripts/deploy.sh` goes over ssh to the clone at `~/occupancy-service` on the box, and stops on a box with no `occupancy.env`. It brings the clone to the head of `main` (or of the branch given after the box), and refuses a clone that is not clean. It builds both images there and starts them with both files.
 
-| Setting | Holds | Default |
-| :--- | :--- | :--- |
-| `BOX_DOMAIN` | The box name, from `/etc/rails49/box.env`; empty on a box with no certificate | None |
-| `OCCUPANCY_ARCHIVE` | The archive's path on the box, mounted read-write; from `occupancy.env` | None |
-| `OCCUPANCY_CAMERA` | The camera's path, under `/dev/v4l/by-id/`; from `occupancy.env` | None |
-| `TC49_UID`, `TC49_GID` | The user and group the service runs as, so the files it saves are the person's: `id -u` and `id -g`; from `occupancy.env` | None |
-| `VIDEO_GID`, `RENDER_GID` | The host's `video` and `render` groups, for the camera and the GPU: `getent group video` and `getent group render`; from `occupancy.env` | None |
-| `OCCUPANCY_SERVICE_COMMIT` | The commit the images are named by and carry as `org.opencontainers.image.revision` | `dev`, and an empty revision |
+| Setting | Holds | Set in | Default |
+| :--- | :--- | :--- | :--- |
+| `BOX_DOMAIN` | The box name; empty on a box with no certificate | `box.env` | None |
+| `OCCUPANCY_ARCHIVE` | The archive's path on the box, mounted read-write | `occupancy.env` | None |
+| `OCCUPANCY_CAMERA` | The camera's path, under `/dev/v4l/by-id/` | `occupancy.env` | None |
+| `TC49_UID`, `TC49_GID` | The user and group the service runs as, so the files it saves are the person's (`id -u`, `id -g`) | `occupancy.env` | None |
+| `VIDEO_GID`, `RENDER_GID` | The host's `video` and `render` groups, for the camera and the GPU (`getent group video`, `getent group render`) | `occupancy.env` | None |
+| `OCCUPANCY_SERVICE_COMMIT` | The commit the images are named by and carry as `org.opencontainers.image.revision` | `scripts/deploy.sh` | `dev`, and an empty revision |
 
-`scripts/deploy.sh` sets `OCCUPANCY_SERVICE_COMMIT`. Compose names a missing setting and the file it belongs in, and starts nothing.
+Compose names a missing setting and the file it belongs in, and starts nothing.
 
 The images are `ghcr.io/rails49/occupancy-service:<commit>` and `ghcr.io/rails49/occupancy-page:<commit>`, for amd64 and arm64. The `images` workflow builds and publishes them when an [installation release](https://github.com/rails49/.github/blob/main/GLOSSARY.md) is made, and a box runs them from one. `scripts/deploy.sh` builds them on the box under the same names.
 
