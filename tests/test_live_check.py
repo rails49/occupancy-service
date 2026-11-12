@@ -659,3 +659,71 @@ def test_with_no_archive_the_sensors_of_l1_are_extra() -> None:
     stub = no_archive(None)
     stub.latest = answer()
     assert "l1/extra-sensor" in failures(stub)
+
+
+def test_save_accepts_a_service_with_an_archive_that_refuses_a_create_with_412() -> None:
+    stub = Stub(offers_saving=True, offers_create=True)
+    assert save_rules(stub) == []
+    assert stub.creates == []
+
+
+@pytest.mark.parametrize("railroad", ["Gleis 49", None])
+def test_save_with_no_archive_checks_the_create_and_creates_nothing(railroad: Any) -> None:
+    stub = no_archive(railroad)
+    stub.offers_create = True
+    assert save_rules(stub) == []
+    assert stub.creates == []
+
+
+def test_save_with_no_archive_accepts_a_service_that_offers_no_create() -> None:
+    assert save_rules(no_archive(None)) == []
+
+
+def test_save_refuses_a_create_not_offered_with_no_allow() -> None:
+    stub = no_archive(None)
+    stub.create_allow = None
+    assert save_rules(stub) == ["create/not-offered"]
+
+
+def test_save_refuses_a_create_that_skips_if_none_match() -> None:
+    stub = Stub(offers_saving=True, offers_create=True, checks_if_none_match=False)
+    assert save_rules(stub) == ["create/if-none-match-missing"]
+
+
+def test_save_refuses_a_create_that_skips_the_origin_check() -> None:
+    stub = no_archive(None)
+    stub.offers_create, stub.checks_origin = True, False
+    assert save_rules(stub) == ["create/origin"]
+
+
+def test_save_refuses_a_create_over_an_archive_it_read() -> None:
+    stub = Stub(offers_saving=True, offers_create=True, checks_exists=False)
+    assert save_rules(stub) == ["create/exists"]
+
+
+def test_save_refuses_a_create_that_takes_a_body_that_is_no_zip() -> None:
+    stub = no_archive("Gleis 49")
+    stub.offers_create, stub.checks_zip = True, False
+    assert save_rules(stub) == ["create/refused"]
+
+
+def test_save_refuses_a_create_refused_with_no_error_field() -> None:
+    stub = no_archive("Gleis 49")
+    stub.offers_create, stub.no_error_field = True, True
+    assert save_rules(stub) == ["create/refused"]
+
+
+def test_save_makes_no_save_from_a_create() -> None:
+    stub = Stub(offers_saving=True, offers_create=True, checks_if_match=False)
+    stub.checks_manifest = False
+    save_rules(stub)
+    assert all(write.startswith(b"{") for write in stub.writes)
+
+
+@pytest.mark.parametrize(("railroad", "rules"), [(None, []), ("Gleis 49", ["create/refused"])])
+def test_save_accepts_409_on_a_create_only_with_no_railroad(
+    railroad: str | None, rules: list[str]
+) -> None:
+    stub = no_archive(railroad)
+    stub.offers_create, stub.no_railroad_409 = True, True
+    assert save_rules(stub) == rules

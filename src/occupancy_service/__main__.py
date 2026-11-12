@@ -144,7 +144,11 @@ def _built(
     settings = ServerSettings(**_given(address=args.address, port=args.port))
     try:
         server = LiveServer(
-            settings, loop, publisher.last_messages, None if railroad is None else railroad.name
+            settings,
+            loop,
+            publisher.last_messages,
+            None if railroad is None else railroad.name,
+            args.archive,
         )
     except (OSError, UnicodeError) as error:  # A host name too long for IDNA is a UnicodeError.
         raise _Refused(

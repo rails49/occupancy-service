@@ -111,6 +111,13 @@ class Stub:
     not_offered_status: int = 405
     not_offered_allow: str | None = "GET"
     writes: list[bytes] = field(default_factory=list)
+    offers_create: bool = False
+    create_allow: str | None = "GET"
+    checks_if_none_match: bool = True
+    checks_exists: bool = True
+    checks_zip: bool = True
+    no_railroad_409: bool = False
+    creates: list[bytes] = field(default_factory=list)
 
     @property
     def etag(self) -> str:
@@ -164,6 +171,9 @@ def serving(stub: Stub) -> Iterator[str]:
 
         def do_PUT(self) -> None:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if self.path == "/base/archive.r49":
+                self.create(body)
+                return
             if not stub.offers_saving:
                 self.not_offered()
                 return
@@ -184,6 +194,31 @@ def serving(stub: Stub) -> Iterator[str]:
                 self.send_response(204)
                 self.send_header("ETag", stub.etag)
                 self.end_headers()
+
+        def create(self, body: bytes) -> None:
+            if not stub.offers_create:
+                self.send_response(405)
+                if stub.create_allow is not None:
+                    self.send_header("Allow", stub.create_allow)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif stub.checks_origin and self.headers.get("Origin") == "http://live-check.invalid":
+                self.status(403)
+            elif stub.checks_if_none_match and self.headers.get("If-None-Match") != "*":
+                self.status(428)
+            elif stub.no_railroad_409:
+                self.status(409)
+            elif stub.checks_exists and stub.manifest_status == 200:
+                self.status(412)
+            elif stub.checks_zip and not body.startswith(b"PK"):
+                answer = b"{}" if stub.no_error_field else b'{"error": "archive/not-zip"}'
+                self.send_response(422)
+                self.send_header("Content-Length", str(len(answer)))
+                self.end_headers()
+                self.wfile.write(answer)
+            else:
+                stub.creates.append(body)
+                self.status(204)
 
         def do_DELETE(self) -> None:
             self.not_offered()
