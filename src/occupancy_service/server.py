@@ -35,6 +35,7 @@ from occupancy_service.drift import DriftReading, DriftUnmeasured
 from occupancy_service.l0 import L0, l0_json
 from occupancy_service.l1 import DetectorState, L1Entry, L1Loop, L1Result, L1Stats
 from occupancy_service.origin import is_own_page
+from occupancy_service.railroad import PLACEHOLDER
 
 _log = logging.getLogger(__name__)
 
@@ -86,12 +87,14 @@ class LiveServer:
         ``railroad`` gives the loaded railroad's name, None when none is known, for the answer
         with no archive and for the path of one to create. Without it no railroad is known.
         ``archive`` is the archive's path, with ``{railroad}`` in it or not, where an archive may
-        be created. Without it none is.
+        be created. Without it none is. The answer with no archive names the railroad only when
+        the path has ``{railroad}`` in it.
         """
         self.settings = settings
         self.loop = loop
         self.last_messages = last_messages
         self.railroad = railroad
+        self.follows_railroad = archive is not None and PLACEHOLDER in archive
         self.writer = ArchiveWriter(lambda: loop.archive, loop.reload)
         self.creator = (
             None
@@ -255,8 +258,10 @@ class _Handler(BaseHTTPRequestHandler):
             if name != _MANIFEST:
                 self.send_error(404)
                 return
-            railroad = None if self.live.railroad is None else self.live.railroad()
-            body = _json({"error": _NO_ARCHIVE, "railroad": railroad})
+            answer: dict[str, str | None] = {"error": _NO_ARCHIVE}
+            if self.live.follows_railroad:
+                answer["railroad"] = None if self.live.railroad is None else self.live.railroad()
+            body = _json(answer)
             self._reply(body, "application/json", no_store=True, status=404)
             return
         try:
