@@ -634,10 +634,17 @@ def test_the_command_takes_the_save_flag(capsys: pytest.CaptureFixture[str]) -> 
     assert "save/origin" in capsys.readouterr().out
 
 
+UNNAMED = object()
+"""A ``railroad`` left out of the answer, as a path that does not depend on it has."""
+
+
 def no_archive(railroad: Any) -> Stub:
     """A service with no archive, serving a frame at a size of the camera's own."""
+    body: dict[str, Any] = {"error": "archive/none"}
+    if railroad is not UNNAMED:
+        body["railroad"] = railroad
     return Stub(
-        manifest=json.dumps({"error": "archive/none", "railroad": railroad}).encode(),
+        manifest=json.dumps(body).encode(),
         manifest_status=404,
         latest=latest_with(l1={}, scores={}),
         frame=jpeg(WIDTH * 2, HEIGHT * 2),
@@ -645,8 +652,8 @@ def no_archive(railroad: Any) -> Stub:
     )
 
 
-@pytest.mark.parametrize("railroad", ["Gleis 49", None])
-def test_accepts_a_service_with_no_archive(railroad: str | None) -> None:
+@pytest.mark.parametrize("railroad", ["Gleis 49", None, UNNAMED])
+def test_accepts_a_service_with_no_archive(railroad: Any) -> None:
     assert failures(no_archive(railroad)) == []
 
 
@@ -720,9 +727,12 @@ def test_save_makes_no_save_from_a_create() -> None:
     assert all(write.startswith(b"{") for write in stub.writes)
 
 
-@pytest.mark.parametrize(("railroad", "rules"), [(None, []), ("Gleis 49", ["create/refused"])])
+@pytest.mark.parametrize(
+    ("railroad", "rules"),
+    [(None, []), ("Gleis 49", ["create/refused"]), (UNNAMED, ["create/refused"])],
+)
 def test_save_accepts_409_on_a_create_only_with_no_railroad(
-    railroad: str | None, rules: list[str]
+    railroad: Any, rules: list[str]
 ) -> None:
     stub = no_archive(railroad)
     stub.offers_create, stub.no_railroad_409 = True, True

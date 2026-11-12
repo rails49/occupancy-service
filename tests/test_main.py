@@ -316,7 +316,7 @@ def test_with_nothing_at_the_path_it_runs_with_no_archive_at_the_cameras_largest
     with started(tmp_path, camera, tmp_path / "nothing-here") as service:
         latest = wait_for(lambda: (answer := service.latest()).get("frame_id") and answer, 30)
         assert latest["l1"] == {}
-        assert manifest_answer(service) == (404, {"error": "archive/none", "railroad": None})
+        assert manifest_answer(service) == (404, {"error": "archive/none"})
         assert check(service.base, timeout=5) == []
     argv = camera.starts()[0].argv
     assert argv[argv.index("-video_size") + 1] == "3840x2160"

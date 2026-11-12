@@ -87,6 +87,7 @@ def live(
     l1_settings: Mapping[str, Any] | None = None,
     detector: FakeDetector | None = None,
     railroad: Callable[[], str | None] | None = None,
+    pattern: str | None = None,
     **settings: Any,
 ) -> Iterator[Live]:
     source = FakeSource()
@@ -94,7 +95,7 @@ def live(
     server_settings = ServerSettings(address="127.0.0.1", port=0, **settings)
     l1 = L1Settings(archive, **(l1_settings or {}))
     with running(L1Loop(l1, source, scorer, detector=detector)) as loop:
-        server = LiveServer(server_settings, loop, last_messages, railroad)
+        server = LiveServer(server_settings, loop, last_messages, railroad, pattern)
         server.start()
         try:
             yield Live(server, loop, source, scorer)
@@ -905,7 +906,10 @@ def test_events_clients_are_closed_at_the_first_result_under_a_new_manifest(
 def test_with_no_archive_the_manifest_is_404_with_the_railroad_and_frames_are_served(
     tmp_path: Path,
 ) -> None:
-    with live(tmp_path / "Gleis 49.r49", {}, railroad=lambda: "Gleis 49") as service:
+    pattern = str(tmp_path / "{railroad}.r49")
+    with live(
+        tmp_path / "Gleis 49.r49", {}, railroad=lambda: "Gleis 49", pattern=pattern
+    ) as service:
         response = service.get("/live/archive/manifest.json")
         assert response.status == 404
         assert response.headers.get_content_type() == "application/json"
@@ -923,10 +927,22 @@ def test_with_no_archive_the_manifest_is_404_with_the_railroad_and_frames_are_se
 def test_with_no_archive_and_no_railroad_known_the_railroad_is_null(
     tmp_path: Path, railroad: Callable[[], str | None] | None
 ) -> None:
-    with live(tmp_path / "nothing-here", {}, railroad=railroad) as service:
+    pattern = str(tmp_path / "{railroad}.r49")
+    with live(tmp_path / "nothing-here", {}, railroad=railroad, pattern=pattern) as service:
         response = service.get("/live/archive/manifest.json")
         assert response.status == 404
         assert json.loads(response.read()) == {"error": "archive/none", "railroad": None}
+
+
+@pytest.mark.parametrize("pattern", [None, "layout.r49"], ids=["no path", "no placeholder"])
+def test_with_no_archive_and_a_path_without_the_railroad_the_answer_names_none(
+    tmp_path: Path, pattern: str | None
+) -> None:
+    path = None if pattern is None else str(tmp_path / pattern)
+    with live(tmp_path / "nothing-here", {}, railroad=lambda: "Gleis 49", pattern=path) as service:
+        response = service.get("/live/archive/manifest.json")
+        assert response.status == 404
+        assert json.loads(response.read()) == {"error": "archive/none"}
 
 
 def test_the_archive_served_is_the_one_the_loop_opened(tmp_path: Path) -> None:

@@ -256,7 +256,7 @@ A service may run with no archive. Then `GET <base>/archive/manifest.json` answe
 {"error": "archive/none", "railroad": "Gleis 49"}
 ```
 
-`railroad` is the name of the loaded railroad, or `null` when the service knows none. Every other file under `<base>/archive/` is 404, and `PUT` and `DELETE` under it answer 405. A page may [create an archive](#creating-an-archive).
+`railroad` is there when the archive's path depends on the loaded railroad. It is the railroad's name, or `null` when none is loaded. With a path that does not depend on it, the answer has no `railroad`. Every other file under `<base>/archive/` is 404, and `PUT` and `DELETE` under it answer 405. A page may [create an archive](#creating-an-archive).
 
 `latest` answers with an empty `l1`, and still carries each frame, so a page can make the railroad's first archive from it. With no `camera.resolution`, a frame is at the camera's own size. `events` sends no event.
 
@@ -332,7 +332,7 @@ uvx --from git+https://github.com/rails49/occupancy-service live-check <base>
 
 It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. If it cannot read the manifest it stops there, because the other rules need it. With [no archive](#no-archive) it checks the rest with no sensors, and `--save` checks only the create.
 
-With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. It checks creating with a body that is no zip, for 428 and 403. Over the archive it read, it checks for 412. With no archive, it checks for 422, or for 409 when no railroad is loaded. A service that answers 405 with `Allow: GET` does not offer creating. A service that wrongly accepts that body has it as its archive. Without the flag it writes nothing.
+With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. It checks creating with a body that is no zip, for 428 and 403. Over the archive it read, it checks for 412. With no archive, it checks for 422, or for 409 when the answer has `"railroad": null`. A service that answers 405 with `Allow: GET` does not offer creating. A service that wrongly accepts that body has it as its archive. Without the flag it writes nothing.
 
 It checks format and consistency only, so it does not run the [drift cases](#drift-cases) or the [L1 cases](#l1-cases). Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
 
@@ -393,6 +393,6 @@ It checks format and consistency only, so it does not run the [drift cases](#dri
 | `create/if-none-match-missing` | With `--save`, a create with no `If-None-Match` does not answer 428. |
 | `create/origin` | With `--save`, a create with a foreign `Origin` does not answer 403. |
 | `create/exists` | With `--save`, a create over the archive it read does not answer 412. |
-| `create/refused` | With `--save` and no archive, a create of a body that is no zip does not answer 422 with a JSON `error` field, or 409 with no railroad loaded. |
+| `create/refused` | With `--save` and no archive, a create of a body that is no zip does not answer 422 with a JSON `error` field, or 409 with `"railroad": null`. |
 
 An event breaks the `l1/` rules as an entry in `latest` does.
