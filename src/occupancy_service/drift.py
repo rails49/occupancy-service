@@ -35,6 +35,7 @@ _JOIN_WAIT = 2.0  # Seconds stop() waits for the thread, which may be in the mid
 
 _NO_READING_YET = "no reading yet"
 _NO_FIRST_IMAGE = "no first image"
+_NO_ARCHIVE = "no archive"
 _DPT_UNRESOLVED = "DPT unresolved"
 _CHECK_FAILED = "check failed"
 
@@ -183,12 +184,14 @@ class DriftMonitor:
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def use(self, archive: r49.R49Archive, dpt: float | None) -> None:
+    def use(self, archive: r49.R49Archive | None, dpt: float | None) -> None:
         """Measure against this archive's first image from now on, with its DPT. The thread builds
-        the check, so this does not wait for the image to decode."""
-        images = archive.manifest.images
-        if not images or dpt is None:
-            reason = _DPT_UNRESOLVED if images else _NO_FIRST_IMAGE
+        the check, so this does not wait for the image to decode. None is no archive."""
+        images = () if archive is None else archive.manifest.images
+        if archive is None or not images or dpt is None:
+            reason = (
+                _NO_ARCHIVE if archive is None else _DPT_UNRESOLVED if images else _NO_FIRST_IMAGE
+            )
             with self._lock:
                 self._reference, self._reading = None, DriftUnmeasured(reason)
             return

@@ -67,8 +67,9 @@ _DETECTOR_MAY_ANSWER = (_NO_TRACK, _NO_MODEL)
 
 @dataclass(frozen=True)
 class L1Settings:
-    """``archive`` is what ``r49.load`` takes as a path. A sensor farther than ``no_track_limit_g``
-    gauges from every track is ``unknown``. ``engine`` and ``device`` are as
+    """``archive`` is what ``r49.load`` takes as a path, and None or a path with nothing at it is
+    no archive. A sensor farther than ``no_track_limit_g`` gauges from every track is
+    ``unknown``. ``engine`` and ``device`` are as
     ``classifier.Classifier`` takes them, or ``auto``, as ``engine_choice`` picks them.
     Scoring has stalled after ``stalled_after`` seconds with the camera fine and no new result.
     The drift check samples every ``drift_every`` seconds. Every sensor is ``unknown`` past
@@ -81,7 +82,7 @@ class L1Settings:
     ends. None, the default, imports no detector.
     """
 
-    archive: str | os.PathLike[str]
+    archive: str | os.PathLike[str] | None
     no_track_limit_g: float = 0.3
     engine: ClassifierEngine = "auto"
     device: str = "auto"
@@ -223,15 +224,20 @@ class _ClassifierScorer:
 @dataclass(frozen=True)
 class _Geometry:
     """What one manifest says about scoring. ``unknown`` holds each sensor that is ``unknown``
-    whatever the frame shows, with its reason, and ``to_score`` the others."""
+    whatever the frame shows, with its reason, and ``to_score`` the others. With no archive there
+    are no sensors, and ``size`` is None: a frame of any size is served."""
 
     sensor_ids: tuple[str, ...]
     positions: Mapping[str, tuple[float, float]]
     archive_id: str
-    size: tuple[int, int]
+    size: tuple[int, int] | None
     dpt: float | None
     to_score: tuple[classifier.Sensor, ...]
     unknown: Mapping[str, str]
+
+
+def _no_geometry() -> _Geometry:
+    return _Geometry((), {}, "", None, None, (), {})
 
 
 def _geometry_of(manifest: r49.Manifest, no_track_limit_g: float, has_model: bool) -> _Geometry:
@@ -305,6 +311,19 @@ def _entry(p_occupied: float | None, threshold: float) -> L1Entry:
     return L1Entry("clear")
 
 
+def _opened(
+    archive: str | os.PathLike[str] | None,
+) -> tuple[str | os.PathLike[str] | None, r49.R49Archive | None]:
+    """The path and the archive at it, both None with no archive. Raises what ``r49.load`` raises
+    but for a path with nothing at it."""
+    if archive is None:
+        return None, None
+    try:
+        return archive, r49.load(archive)
+    except FileNotFoundError:
+        return None, None
+
+
 class _Unpaused:
     """The frames of ``source``, and none while ``paused()``."""
 
@@ -333,9 +352,12 @@ class L1Loop:
         scorer: Scorer | None = None,
         make_drift_check: Callable[[Gray], Check] = DriftCheck,
         detector: Detector | None = None,
+        camera: Callable[[r49.Resolution | None], None] | None = None,
     ) -> None:
-        """Reads the manifest, and raises what ``r49.load`` raises when it cannot be read. The
-        model the settings name loads in ``start()``.
+        """Reads the manifest, and raises what ``r49.load`` raises when it cannot be read, but for
+        a path with nothing at it, which is no archive. The model the settings name loads in
+        ``start()``. ``camera`` is given the ``camera.resolution`` of each archive opened, here
+        and in ``open``, and None for no archive.
 
         ``scorer`` stands in for the model the settings name, and ``make_drift_check`` for the
         drift check. ``detector`` stands in for the detector model the settings name, and is
@@ -346,10 +368,12 @@ class L1Loop:
         self._scorer = scorer
         self._model_to_load = scorer is None
         self._detector = detector
+        self._camera = camera
         self._detector_state: DetectorState | None = None
         self._classifier_choice: Choice | None = None
         self._l0_loop: L0Loop | None = None
         self._lock = threading.Lock()
+        self._opening = threading.Lock()  # Held from reading an archive's path to using it.
         self._paused = False
         # From a pause until the first result after it, L1 reads ``track power off``.
         self._power_off_shown = False
@@ -364,11 +388,12 @@ class L1Loop:
                 make_drift_check,
             )
         )
-        archive = r49.load(settings.archive)
-        self._manifest = archive.manifest
+        self._archive_path, archive = _opened(settings.archive)
+        self._manifest = None if archive is None else archive.manifest
         self._geometry = self._geometry_from(archive)
         if self._drift is not None:
             self._drift.use(archive, self._geometry.dpt)
+        self._tell_camera(archive)
         self._scored: _Scored | None = None
         self._scored_at = 0.0
         self._camera_ok_since: float | None = None
@@ -386,7 +411,7 @@ class L1Loop:
             with self._lock:
                 self._scorer = scorer
                 self._model_to_load = False
-                if scorer is None:
+                if scorer is None and self._manifest is not None:
                     self._geometry = self._geometry_of(self._manifest)
                     self._advance()
         self._start_detector()
@@ -442,18 +467,40 @@ class L1Loop:
                 self._scored_at = time.monotonic()
             self._advance()
 
+    @property
+    def archive(self) -> str | os.PathLike[str] | None:
+        """The path of the archive in use. None with no archive."""
+        with self._lock:
+            return self._archive_path
+
     def reload(self) -> None:
         """Read the manifest again, for the next frame to use, and rebuild the drift check. The
         frame in progress finishes under the old one. When this raises, as ``r49.load`` does,
         nothing has changed."""
-        archive = r49.load(self._settings.archive)
-        geometry = self._geometry_from(archive)
+        with self._opening:
+            self._open(self.archive)
+
+    def open(self, archive: str | os.PathLike[str] | None) -> None:
+        """Use the archive at this path from the next frame on, as ``reload`` does. None, or a
+        path with nothing at it, is no archive. When this raises, nothing has changed."""
+        with self._opening:
+            self._open(archive)
+
+    def _open(self, archive: str | os.PathLike[str] | None) -> None:
+        path, opened = _opened(archive)
+        geometry = self._geometry_from(opened)
         with self._lock:
-            self._manifest = archive.manifest
+            self._archive_path = path
+            self._manifest = None if opened is None else opened.manifest
             self._geometry = geometry
             if self._drift is not None:
-                self._drift.use(archive, geometry.dpt)
+                self._drift.use(opened, geometry.dpt)
             self._advance()
+        self._tell_camera(opened)
+
+    def _tell_camera(self, archive: r49.R49Archive | None) -> None:
+        if self._camera is not None:
+            self._camera(None if archive is None else archive.manifest.camera.resolution)
 
     def stats(self) -> L1Stats:
         return self.read()[1]
@@ -511,8 +558,8 @@ class L1Loop:
         self._l0_loop.start()
 
     def _l0_view(self) -> tuple[float | None, tuple[int, int]]:
-        with self._lock:
-            return self._geometry.dpt, self._geometry.size
+        with self._lock:  # With no archive there is no DPT, so the size is not used.
+            return self._geometry.dpt, self._geometry.size or (0, 0)
 
     def _fresh_l0(self) -> L0 | None:
         if self._l0_loop is None:
@@ -523,7 +570,7 @@ class L1Loop:
     def _combined(self, scored: _Scored, l0: L0 | None) -> Mapping[str, L1Entry]:
         """The classifier's L1 of ``scored`` with what ``l0`` says, under that result's manifest."""
         geometry = scored.geometry
-        if l0 is None or geometry.dpt is None:
+        if l0 is None or geometry.dpt is None or geometry.size is None:
             says: Mapping[str, DetectorSays] = {}
         else:
             says = detector_says(
@@ -549,8 +596,8 @@ class L1Loop:
             return None
         return scorer
 
-    def _geometry_from(self, archive: r49.R49Archive) -> _Geometry:
-        return self._geometry_of(archive.manifest)
+    def _geometry_from(self, archive: r49.R49Archive | None) -> _Geometry:
+        return _no_geometry() if archive is None else self._geometry_of(archive.manifest)
 
     def _geometry_of(self, manifest: r49.Manifest) -> _Geometry:
         has_model = self._scorer is not None or self._model_to_load
@@ -583,7 +630,7 @@ class L1Loop:
         decode_ms = (time.perf_counter() - start) * 1000
         if image is None:
             return None
-        if (image.shape[1], image.shape[0]) != geometry.size:
+        if geometry.size is not None and (image.shape[1], image.shape[0]) != geometry.size:
             l1 = {
                 id: L1Entry("unknown", reason=geometry.unknown.get(id, _WRONG_FRAME_SIZE))
                 for id in geometry.sensor_ids
@@ -649,7 +696,7 @@ class L1Loop:
         else:
             live_reason = None
         geometry = scored.geometry if scored is not None else self._geometry
-        l0 = self._fresh_l0()
+        l0 = None if self._manifest is None else self._fresh_l0()
         if live_reason is None and scored is not None:
             l1 = self._combined(scored, None if scored.wrong_frame_size else l0)
         else:

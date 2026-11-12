@@ -671,3 +671,98 @@ def test_a_result_says_when_its_frame_is_not_at_the_cameras_resolution(tmp_path:
     with running(L1Loop(L1Settings(archive), source, FakeScorer({"s1": 0.9}))) as loop:
         assert served(loop, source.show()).wrong_frame_size is False
         assert served(loop, source.show(jpeg(WIDTH // 2, HEIGHT))).wrong_frame_size is True
+
+
+def test_with_no_archive_a_frame_of_any_size_is_served_with_no_sensors(tmp_path: Path) -> None:
+    source = FakeSource()
+    scorer = FakeScorer({})
+
+    with running(L1Loop(L1Settings(tmp_path / "nothing-here"), source, scorer)) as loop:
+        assert loop.archive is None
+        result = served(loop, source.show(jpeg(WIDTH * 2, HEIGHT * 2)))
+
+    assert result.l1 == {}
+    assert result.wrong_frame_size is False
+    assert result.archive_id == ""
+    assert result.l0 is None
+    assert scorer.sensors == []
+
+
+def test_opening_an_archive_brings_its_sensors_and_closing_it_takes_them_away(
+    tmp_path: Path,
+) -> None:
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    source = FakeSource()
+
+    with running(L1Loop(L1Settings(None), source, FakeScorer({"s1": 0.9}))) as loop:
+        assert served(loop, source.show()).l1 == {}
+        subscription = loop.subscribe()
+        loop.open(archive)
+        assert loop.archive == archive
+        opened = served(loop, source.show())
+        assert subscription.outdated
+        loop.open(tmp_path / "nothing-here")
+        assert loop.archive is None
+        closed = served(loop, source.show())
+
+    assert opened.l1 == {"s1": L1Entry("occupied", confidence=0.9)}
+    assert opened.archive_id == "archive-1"
+    assert closed.l1 == {}
+
+
+def test_opening_an_archive_that_cannot_be_read_raises_and_keeps_the_one_in_use(
+    tmp_path: Path,
+) -> None:
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    broken = tmp_path / "b"
+    broken.mkdir()
+    (broken / "manifest.json").write_text("not json")
+    source = FakeSource()
+
+    with running(L1Loop(L1Settings(archive), source, FakeScorer({"s1": 0.9}))) as loop:
+        with pytest.raises(r49.R49Error):
+            loop.open(broken)
+        assert loop.archive == archive
+        assert served(loop, source.show()).l1["s1"].state == "occupied"
+
+
+def test_the_camera_is_given_the_size_of_each_archive_opened(tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    sizes: list[r49.Resolution | None] = []
+
+    loop = L1Loop(L1Settings(None), FakeSource(), FakeScorer({}), camera=sizes.append)
+    loop.open(archive)
+    loop.reload()
+    loop.open(None)
+
+    size = r49.Resolution(width=WIDTH, height=HEIGHT)
+    assert sizes == [None, size, size, None]
+
+
+def test_a_reload_does_not_undo_an_open_that_comes_while_it_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = write_archive(tmp_path / "a", {"s1": (160, 120)})
+    second = write_archive(tmp_path / "b", {"s2": (160, 120)})
+    loop = L1Loop(L1Settings(first), FakeSource(), FakeScorer({}))
+    reading, release = threading.Event(), threading.Event()
+    load = r49.load
+
+    def slow_load(path: Any) -> r49.R49Archive:
+        if Path(path) == first:
+            reading.set()
+            release.wait(5)
+        return load(path)
+
+    monkeypatch.setattr(r49, "load", slow_load)
+    reload = threading.Thread(target=loop.reload)
+    reload.start()
+    reading.wait(5)
+    opening = threading.Thread(target=loop.open, args=(second,))
+    opening.start()
+    time.sleep(0.1)  # Time for the open to finish, if nothing holds it back.
+    release.set()
+    reload.join(5)
+    opening.join(5)
+
+    assert loop.archive == second

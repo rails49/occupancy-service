@@ -77,7 +77,7 @@ def serving(archive: Path, scores: dict[str, float] | None = None) -> Iterator[S
     source = FakeSource()
     scorer = FakeScorer(scores if scores is not None else {"s1": 0.9})
     with running(L1Loop(L1Settings(archive), source, scorer)) as loop:
-        server = LiveServer(ServerSettings(port=0), archive, loop)
+        server = LiveServer(ServerSettings(port=0), loop)
         server.start()
         try:
             yield Service(server, loop, source, archive)
@@ -485,3 +485,11 @@ def test_the_checker_with_save_passes_with_no_way_to_write(unwritable: Path) -> 
         service.served()
         base = f"http://127.0.0.1:{service.server.port}/live"
         assert check(base, timeout=5, save=True) == []
+
+
+def test_with_no_archive_a_write_is_405(tmp_path: Path) -> None:
+    with serving(tmp_path / "nothing-here") as service:
+        for method, path in (("PUT", PHOTO), ("PUT", MANIFEST), ("DELETE", PHOTO)):
+            status, headers, _ = service.send(method, path, b"x" if method == "PUT" else None)
+            assert status == 405
+            assert headers["Allow"] == "GET"

@@ -93,6 +93,7 @@ class Stub:
     patches_with_after: bool = True
     manifest: bytes = field(default_factory=lambda: json.dumps(manifest()).encode())
     manifest_type: str = "application/json"
+    manifest_status: int = 200
     events: list[dict[str, Any]] = field(default_factory=events)
     events_type: str = "text/event-stream"
     raw_events: bytes | None = None
@@ -214,7 +215,7 @@ def serving(stub: Stub) -> Iterator[str]:
             self.end_headers()
 
         def reply_manifest(self) -> None:
-            self.send_response(200)
+            self.send_response(stub.manifest_status)
             self.send_header("Content-Type", stub.manifest_type)
             self.send_header("Content-Length", str(len(stub.manifest)))
             if stub.offers_saving:

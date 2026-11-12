@@ -13,7 +13,8 @@ from occupancy_service.l1 import L1Entry
 
 _SHIPPED = Path(__file__).parent / "profiles"
 _KEYS = {"topic", "payload", "retain", "qos", "repeat"}
-_OPTIONAL_KEYS = {"clear_hold_s", "l0_topic"}
+_RAILROAD_KEYS = ("railroad_topic", "railroad_field", "railroad_stamp")
+_OPTIONAL_KEYS = {"clear_hold_s", "l0_topic", *_RAILROAD_KEYS}
 _STATES = ("occupied", "clear", "unknown")
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 # Braces around a name with spaces or hyphens, which a reader takes for a placeholder. Braces
@@ -49,10 +50,20 @@ def encode(message: Message) -> bytes:
 
 
 @dataclass(frozen=True)
+class RailroadTopic:
+    """Where the loaded railroad is read: a topic whose messages are JSON objects, and the fields
+    of the railroad's name and of its build's stamp."""
+
+    topic: str
+    field: str
+    stamp: str
+
+
+@dataclass(frozen=True)
 class Profile:
     """One loaded profile, named after its file. ``repeat`` and ``clear_hold_s`` are in seconds. A
     ``repeat`` of 0 means no repeat, and a ``clear_hold_s`` of 0 means no hold. An ``l0_topic`` of
-    None means it publishes no L0."""
+    None means it publishes no L0. A ``railroad`` of None names no railroad topic."""
 
     name: str
     topic: str
@@ -62,6 +73,7 @@ class Profile:
     repeat: float
     clear_hold_s: float = 0
     l0_topic: str | None = None
+    railroad: RailroadTopic | None = None
 
     def topic_for(self, sensor: str, archive_id: str) -> str | None:
         """The topic of ``sensor``. None when a topic cannot carry its id or the archive's: a
@@ -133,6 +145,23 @@ def _parse(name: str, table: dict[str, Any]) -> Profile:
         repeat=_parse_repeat(table["repeat"]),
         clear_hold_s=_parse_clear_hold(table.get("clear_hold_s", 0)),
         l0_topic=_parse_l0_topic(table.get("l0_topic")),
+        railroad=_parse_railroad(table),
+    )
+
+
+def _parse_railroad(table: dict[str, Any]) -> RailroadTopic | None:
+    given = [key for key in _RAILROAD_KEYS if key in table]
+    if not given:
+        return None
+    if len(given) < len(_RAILROAD_KEYS):
+        raise ValueError(f"{', '.join(_RAILROAD_KEYS)} go together")
+    for key in ("railroad_field", "railroad_stamp"):
+        if not isinstance(table[key], str) or not table[key]:
+            raise ValueError(f"{key} must be a non-empty string")
+    return RailroadTopic(
+        _parse_topic(table["railroad_topic"], "railroad_topic", set()),
+        table["railroad_field"],
+        table["railroad_stamp"],
     )
 
 

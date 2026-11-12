@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 from typing import Any, get_args
 
-import r49
 from classifier.runtime import Engine
 
 from occupancy_service.capture import Capture, CaptureSettings
@@ -21,6 +20,12 @@ from occupancy_service.l1 import L1Loop, L1Settings
 from occupancy_service.power import PowerGate, PowerSettings
 from occupancy_service.profile import ProfileError
 from occupancy_service.publisher import Publisher, PublisherSettings
+from occupancy_service.railroad import (
+    PLACEHOLDER,
+    RailroadFollower,
+    RailroadSettings,
+    railroad_source,
+)
 from occupancy_service.server import LiveServer, ServerSettings
 
 _log = logging.getLogger("occupancy_service")
@@ -53,7 +58,11 @@ def _parser() -> argparse.ArgumentParser:
         prog="python -m occupancy_service",
         description="Publish each sensor's occupancy from one archive and one camera.",
     )
-    parser.add_argument("--archive", required=True, help="the archive, a folder or a .r49 file")
+    parser.add_argument(
+        "--archive",
+        required=True,
+        help="the archive, a folder or a .r49 file. {railroad} in it is the loaded railroad's name",
+    )
     parser.add_argument("--camera", required=True, help="the camera's device, e.g. /dev/video0")
     parser.add_argument(
         "--broker",
@@ -97,22 +106,26 @@ def _one_line(error: BaseException) -> str:
     return " ".join(str(error).split()) or type(error).__name__
 
 
-def _built(args: argparse.Namespace) -> tuple[Capture, L1Loop, Publisher, LiveServer]:
+def _built(
+    args: argparse.Namespace,
+) -> tuple[Capture, L1Loop, Publisher, RailroadFollower | None, LiveServer]:
     """Every part, with none started, so a refusal leaves no ``ffmpeg`` and no thread behind. The
-    ``LiveServer`` comes last because making it binds the port."""
+    ``LiveServer`` comes last because making it binds the port. With ``{railroad}`` in the path,
+    the loop starts with no archive, and the follower opens one."""
     try:
-        resolution = r49.load(args.archive).manifest.camera.resolution
         capture = Capture(
-            CaptureSettings(resolution, device=args.camera, **_given(frame_rate=args.frame_rate))
+            CaptureSettings(None, device=args.camera, **_given(frame_rate=args.frame_rate))
         )
         detector = _given(
             detector_model=args.detector_model,
             detector_engine=args.detector_engine,
             detector_device=args.detector_device,
         )
+        archive = None if PLACEHOLDER in args.archive else args.archive
         loop = L1Loop(
-            L1Settings(args.archive, **_given(engine=args.engine, device=args.device), **detector),
+            L1Settings(archive, **_given(engine=args.engine, device=args.device), **detector),
             capture,
+            camera=capture.use,
         )
     except Exception as error:  # What r49.load raises for a URL is the HTTP library's to choose.
         raise _Refused(f"cannot read the archive {args.archive}: {_one_line(error)}") from error
@@ -120,21 +133,29 @@ def _built(args: argparse.Namespace) -> tuple[Capture, L1Loop, Publisher, LiveSe
     profiles = _given(profiles=tuple(args.profile) if args.profile else None)
     try:
         publisher = Publisher(PublisherSettings(host, port, **profiles), loop)
+        source = railroad_source(publisher.profiles)
     except ProfileError as error:
         raise _Refused(f"cannot use a profile: {_one_line(error)}") from error
+    railroad = (
+        None
+        if source is None
+        else RailroadFollower(RailroadSettings(args.archive, source, host, port), loop)
+    )
     settings = ServerSettings(**_given(address=args.address, port=args.port))
     try:
-        server = LiveServer(settings, args.archive, loop, publisher.last_messages)
+        server = LiveServer(
+            settings, loop, publisher.last_messages, None if railroad is None else railroad.name
+        )
     except (OSError, UnicodeError) as error:  # A host name too long for IDNA is a UnicodeError.
         raise _Refused(
             f"cannot bind {settings.address}:{settings.port}: {_one_line(error)}"
         ) from error
-    return capture, loop, publisher, server
+    return capture, loop, publisher, railroad, server
 
 
 def _serve(args: argparse.Namespace) -> None:
     """Runs the parts until a signal raises ``KeyboardInterrupt``."""
-    capture, loop, publisher, server = _built(args)
+    capture, loop, publisher, railroad, server = _built(args)
     gate = (
         None
         if args.power_topic is None
@@ -145,6 +166,8 @@ def _serve(args: argparse.Namespace) -> None:
         loop.start()
         if gate is not None:
             gate.start()
+        if railroad is not None:
+            railroad.start()
         publisher.start()
         server.start()
         _log.info("serving %s on port %d", args.archive, server.port)
@@ -156,6 +179,8 @@ def _serve(args: argparse.Namespace) -> None:
             signal.signal(number, signal.SIG_IGN)
         if gate is not None:
             gate.stop()
+        if railroad is not None:
+            railroad.stop()
         server.stop()
         publisher.stop()  # While the loop runs, as it reads the sensors for ``service stopped``.
         loop.stop()

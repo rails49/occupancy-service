@@ -3,6 +3,7 @@
 import io
 import logging
 import os
+import re
 import select
 import subprocess
 import threading
@@ -28,14 +29,18 @@ _FRAME_POLL = 0.01  # Seconds between looks for a new frame.
 _READ_SIZE = 1 << 16
 _SOI, _EOI, _SOS = 0xD8, 0xD9, 0xDA
 _UNDECODABLE = (OSError, ValueError, SyntaxError, Image.DecompressionBombError)
+_MJPEG_SIZES = re.compile(r"Compressed:\s*mjpeg\s*:[^:]*:(.*)")
+_SIZE = re.compile(r"\b(\d+)x(\d+)\b")
 
 
 @dataclass(frozen=True)
 class CaptureSettings:
-    """``resolution`` is the manifest's ``camera.resolution``. The camera is ``lost`` after
-    ``lost_after`` seconds with no new frame."""
+    """``resolution`` is the open archive's ``camera.resolution``. None, with no archive, is the
+    largest size the camera lists for MJPEG, asked again at each start of ``ffmpeg``.
+    ``Capture.use`` changes it. The camera is ``lost`` after ``lost_after`` seconds with no new
+    frame."""
 
-    resolution: r49.Resolution
+    resolution: r49.Resolution | None
     device: str = "/dev/video0"
     frame_rate: float = 20
     hang_limit: float = 3
@@ -119,12 +124,43 @@ class CaptureStatus:
     rate_fps: float
 
 
-def _ffmpeg_command(settings: CaptureSettings) -> list[str]:
+def largest_size(text: str) -> tuple[int, int] | None:
+    """The largest of the MJPEG sizes in what ``ffmpeg -list_formats compressed`` prints. None
+    when it lists none."""
+    found = _MJPEG_SIZES.search(text)
+    sizes = [] if found is None else _SIZE.findall(found[1])
+    return max(((int(w), int(h)) for w, h in sizes), key=lambda s: s[0] * s[1], default=None)
+
+
+def _listed_size(settings: CaptureSettings) -> tuple[int, int] | None:
+    """The camera's largest MJPEG size, as ``ffmpeg`` lists it. None when it lists none, as with
+    no camera."""
+    # fmt: off
+    command = [
+        settings.ffmpeg, "-hide_banner", "-nostdin",
+        "-f", "v4l2", "-list_formats", "compressed", "-i", settings.device,
+    ]
+    # fmt: on
+    try:
+        listed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=settings.hang_limit,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        _log.warning("cannot list the camera's sizes: %s", error)
+        return None
+    return largest_size(listed.stderr.decode(errors="replace"))
+
+
+def _ffmpeg_command(settings: CaptureSettings, width: int, height: int) -> list[str]:
     """Copy MJPEG from the camera to stdout, with no decode and no re-encode.
 
     ``mjpeg2jpeg`` adds the Huffman tables, because some UVC cameras leave them out.
     """
-    size = f"{settings.resolution.width}x{settings.resolution.height}"
+    size = f"{width}x{height}"
     # fmt: off
     return [
         settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
@@ -153,6 +189,8 @@ class Capture:
         self._last_arrival: float | None = None
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
+        self._resolution = settings.resolution
+        self._new_size = threading.Event()
 
     def start(self) -> None:
         self._stopping.clear()
@@ -164,6 +202,14 @@ class Capture:
         if self._thread is not None:
             self._thread.join()
             self._thread = None
+
+    def use(self, resolution: r49.Resolution | None) -> None:
+        """Capture at ``resolution`` from now on, as ``CaptureSettings.resolution`` says. A new
+        one ends the running ``ffmpeg``, and the next starts at it."""
+        with self._lock:
+            if resolution != self._resolution:
+                self._resolution = resolution
+                self._new_size.set()
 
     def latest(self) -> Frame | None:
         """The newest frame, however old. None before the first one."""
@@ -186,10 +232,22 @@ class Capture:
             self._stopping.wait(_RETRY_WAIT)
 
     def _run_child(self) -> None:
-        """One ffmpeg, from its start until it ends, hangs or stop() is called."""
+        """One ffmpeg, from its start until it ends, hangs or stop() is called. With no resolution
+        set and no size listed, none."""
+        with self._lock:
+            resolution = self._resolution
+            self._new_size.clear()
+        if resolution is None:
+            size = _listed_size(self._settings)
+            if size is None:
+                return
+        else:
+            size = (resolution.width, resolution.height)
         try:
             child = subprocess.Popen(
-                _ffmpeg_command(self._settings), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE
+                _ffmpeg_command(self._settings, *size),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
             )
         except OSError as error:
             _log.warning("cannot start ffmpeg: %s", error)
@@ -206,10 +264,11 @@ class Capture:
                 _log.warning("ffmpeg %d has not ended after a kill", child.pid)
 
     def _read_frames(self, pipe: int) -> None:
-        """Until the pipe ends, no frame arrives within the hang limit, or stop() is called."""
+        """Until the pipe ends, no frame arrives within the hang limit, a new size is set, or
+        stop() is called."""
         splitter = _JpegSplitter()
         deadline = time.monotonic() + self._settings.hang_limit
-        while not self._stopping.is_set():
+        while not self._stopping.is_set() and not self._new_size.is_set():
             if select.select([pipe], [], [], _POLL)[0]:
                 data = os.read(pipe, _READ_SIZE)
                 if not data:

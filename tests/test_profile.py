@@ -8,7 +8,13 @@ from typing import Any
 import pytest
 
 from occupancy_service.l1 import L1Entry
-from occupancy_service.profile import Profile, ProfileError, encode, load_profile
+from occupancy_service.profile import (
+    Profile,
+    ProfileError,
+    RailroadTopic,
+    encode,
+    load_profile,
+)
 
 OCCUPIED = L1Entry("occupied", confidence=0.93)
 CLEAR = L1Entry("clear")
@@ -86,6 +92,35 @@ def test_an_l0_topic_has_no_topic_with_an_archive_id_it_cannot_carry(
 )
 def test_refuses_an_l0_topic_it_cannot_use(tmp_path: Path, line: str, complaint: str) -> None:
     path = write(tmp_path, VALID.replace("[payload]", f"{line}\n[payload]"))
+    with pytest.raises(ProfileError, match=complaint):
+        load_profile(str(path))
+
+
+def test_only_the_control_profile_names_the_railroad() -> None:
+    control = load_profile("control")
+    assert control.railroad == RailroadTopic("tc49/layout/state/railroad", "name", "at")
+    for name in ("occupancy", "jmri", "rocrail"):
+        assert load_profile(name).railroad is None
+
+
+T, F, S = 'railroad_topic = "r"', 'railroad_field = "name"', 'railroad_stamp = "at"'
+
+
+@pytest.mark.parametrize(
+    ("lines", "complaint"),
+    [
+        (T, "go together"),
+        (f"{T}\n{F}", "go together"),
+        (f"{F}\n{S}", "go together"),
+        (f'railroad_topic = "r/#"\n{F}\n{S}', "railroad_topic"),
+        (f'railroad_topic = "r/{{sensor}}"\n{F}\n{S}', "sensor"),
+        (f'{T}\nrailroad_field = ""\n{S}', "railroad_field"),
+        (f"{T}\nrailroad_field = 1\n{S}", "railroad_field"),
+        (f'{T}\n{F}\nrailroad_stamp = ""', "railroad_stamp"),
+    ],
+)
+def test_refuses_a_railroad_topic_it_cannot_use(tmp_path: Path, lines: str, complaint: str) -> None:
+    path = write(tmp_path, VALID.replace("[payload]", f"{lines}\n[payload]"))
     with pytest.raises(ProfileError, match=complaint):
         load_profile(str(path))
 

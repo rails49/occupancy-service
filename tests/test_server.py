@@ -86,6 +86,7 @@ def live(
     last_messages: Callable[[], Mapping[str, Mapping[str, LastMessage]]] | None = None,
     l1_settings: Mapping[str, Any] | None = None,
     detector: FakeDetector | None = None,
+    railroad: Callable[[], str | None] | None = None,
     **settings: Any,
 ) -> Iterator[Live]:
     source = FakeSource()
@@ -93,7 +94,7 @@ def live(
     server_settings = ServerSettings(address="127.0.0.1", port=0, **settings)
     l1 = L1Settings(archive, **(l1_settings or {}))
     with running(L1Loop(l1, source, scorer, detector=detector)) as loop:
-        server = LiveServer(server_settings, archive, loop, last_messages)
+        server = LiveServer(server_settings, loop, last_messages, railroad)
         server.start()
         try:
             yield Live(server, loop, source, scorer)
@@ -816,7 +817,7 @@ def test_the_checker_passes_on_a_zip_with_the_packaged_model(tmp_path: Path) -> 
     archive = zip_archive(tmp_path)
     source = FakeSource()
     with running(L1Loop(L1Settings(archive), source)) as loop:
-        server = LiveServer(ServerSettings(port=0), archive, loop)
+        server = LiveServer(ServerSettings(port=0), loop)
         server.start()
         try:
             frame = source.show()
@@ -899,3 +900,50 @@ def test_events_clients_are_closed_at_the_first_result_under_a_new_manifest(
         with event_stream(service) as stream:
             events = {stream.next_event()["sensor"] for _ in range(2)}
             assert events == {"kept", "new"}
+
+
+def test_with_no_archive_the_manifest_is_404_with_the_railroad_and_frames_are_served(
+    tmp_path: Path,
+) -> None:
+    with live(tmp_path / "Gleis 49.r49", {}, railroad=lambda: "Gleis 49") as service:
+        response = service.get("/live/archive/manifest.json")
+        assert response.status == 404
+        assert response.headers.get_content_type() == "application/json"
+        assert json.loads(response.read()) == {"error": "archive/none", "railroad": "Gleis 49"}
+        assert service.get("/live/archive/first.png").status == 404
+
+        frame = service.source.show(jpeg(WIDTH * 2, HEIGHT * 2))
+        wait_until_served(service, frame)
+        latest = read_latest(service)
+        assert latest.fields["l1"] == {}
+        assert latest.parts["frame"].body == frame.jpeg
+
+
+@pytest.mark.parametrize("railroad", [None, lambda: None], ids=["no follower", "none loaded"])
+def test_with_no_archive_and_no_railroad_known_the_railroad_is_null(
+    tmp_path: Path, railroad: Callable[[], str | None] | None
+) -> None:
+    with live(tmp_path / "nothing-here", {}, railroad=railroad) as service:
+        response = service.get("/live/archive/manifest.json")
+        assert response.status == 404
+        assert json.loads(response.read()) == {"error": "archive/none", "railroad": None}
+
+
+def test_the_archive_served_is_the_one_the_loop_opened(tmp_path: Path) -> None:
+    archive = folder_archive(tmp_path)
+    with live(tmp_path / "nothing-here") as service:
+        service.loop.open(archive)
+        response = service.get("/live/archive/manifest.json")
+        assert response.status == 200
+        assert json.loads(response.read())["id"] == "archive-1"
+
+
+def test_the_checker_passes_with_no_archive_with_the_camera_on_and_off(tmp_path: Path) -> None:
+    with live(tmp_path / "nothing-here", {}, railroad=lambda: "Gleis 49") as service:
+        assert check(service.base, timeout=5) == []  # Before any frame.
+
+        wait_until_served(service, service.source.show(jpeg(WIDTH * 2, HEIGHT * 2)))
+        assert check(service.base, timeout=5, save=True) == []
+
+        service.source.state = "lost"
+        assert check(service.base, timeout=5) == []

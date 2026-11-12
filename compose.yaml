@@ -27,12 +27,12 @@ services:
         source: /dev
         target: /dev
       - type: bind
-        source: ${OCCUPANCY_ARCHIVE:?set the archive's path on the box in /etc/rails49/occupancy.env}
-        target: /archive.r49
+        source: ${OCCUPANCY_ARCHIVES:?set the folder of archives on the box in /etc/rails49/occupancy.env}
+        target: /archives
         bind:
           create_host_path: false
     command:
-      - --archive=/archive.r49
+      - --archive=/archives/{railroad}.r49
       - --camera=${OCCUPANCY_CAMERA:?set the camera's path, under /dev/v4l/by-id/, in /etc/rails49/occupancy.env}
       - --broker=broker:1883
       - --profile=occupancy

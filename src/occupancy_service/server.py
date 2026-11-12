@@ -4,7 +4,6 @@ import io
 import json
 import logging
 import mimetypes
-import os
 import secrets
 import socket
 import threading
@@ -43,6 +42,7 @@ _EVENTS_BUFFER = 1 << 16  # Bytes the system holds for an ``events`` client that
 _EVENTS_WAKE = 0.1  # Seconds an ``events`` stream waits before it looks at stop() again.
 _IDLE_TIMEOUT = 30.0  # Seconds an idle connection stays open, and any one write may take.
 _BODY_CHUNK = 1 << 16  # Bytes of a request's body read at a time.
+_NO_ARCHIVE = "archive/none"
 
 
 @dataclass(frozen=True)
@@ -62,24 +62,27 @@ class ServerSettings:
 
 
 class LiveServer:
-    """A thread per request, reading from ``loop`` and ``archive``. The caller owns the loop."""
+    """A thread per request, reading from ``loop`` and the archive it has open. The caller owns
+    the loop."""
 
     def __init__(
         self,
         settings: ServerSettings,
-        archive: str | os.PathLike[str],
         loop: L1Loop,
         last_messages: Callable[[], Mapping[str, Mapping[str, LastMessage]]] | None = None,
+        railroad: Callable[[], str | None] | None = None,
     ) -> None:
         """Binds the address, and raises the ``OSError`` when it cannot.
 
         ``last_messages`` is a ``Publisher``'s, and without it ``latest`` has no such field.
+        ``railroad`` gives the loaded railroad's name, None when none is known, for the answer
+        with no archive. Without it no railroad is known.
         """
         self.settings = settings
-        self.archive = archive
         self.loop = loop
         self.last_messages = last_messages
-        self.writer = ArchiveWriter(archive, loop.reload)
+        self.railroad = railroad
+        self.writer = ArchiveWriter(lambda: loop.archive, loop.reload)
         self.stopping = threading.Event()
         # A frame's id starts again at 1 on a restart, and a reader's id from before one must not
         # read as a frame still to come.
@@ -229,8 +232,17 @@ class _Handler(BaseHTTPRequestHandler):
         if any(segment.startswith(".") for segment in name.split("/")):
             self.send_error(404)
             return
+        archive = self.live.loop.archive
+        if archive is None:
+            if name != _MANIFEST:
+                self.send_error(404)
+                return
+            railroad = None if self.live.railroad is None else self.live.railroad()
+            body = _json({"error": _NO_ARCHIVE, "railroad": railroad})
+            self._reply(body, "application/json", no_store=True, status=404)
+            return
         try:
-            body = r49.load(self.live.archive).image(name)
+            body = r49.load(archive).image(name)
         except (r49.R49Error, OSError):
             _log.exception("reading %r from the archive failed", name)
             self.send_error(500)
@@ -328,9 +340,14 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _reply(
-        self, body: bytes, content_type: str, no_store: bool = False, etag: str | None = None
+        self,
+        body: bytes,
+        content_type: str,
+        no_store: bool = False,
+        etag: str | None = None,
+        status: int = 200,
     ) -> None:
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         if no_store:
