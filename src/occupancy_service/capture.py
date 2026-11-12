@@ -40,8 +40,8 @@ class CaptureSettings:
 
     ``resolution`` is the open archive's ``camera.resolution``. None, with no archive, is the
     largest size the camera lists for MJPEG, asked again at each start of ``ffmpeg``.
-    ``Capture.use`` changes it. A stream comes at the size and ``frame_rate`` of its source, so
-    neither applies to it. The camera is ``lost`` after ``lost_after`` seconds with no new
+    ``Capture.use`` changes it. A stream is not asked for a size or ``frame_rate``: its source
+    sets both. The camera is ``lost`` after ``lost_after`` seconds with no new
     frame."""
 
     resolution: r49.Resolution | None
@@ -159,21 +159,22 @@ def _listed_size(settings: CaptureSettings) -> tuple[int, int] | None:
     return largest_size(listed.stderr.decode(errors="replace"))
 
 
-def is_stream(device: str) -> bool:
+def _is_stream(device: str) -> bool:
     """Whether ``device`` is the URL of a stream rather than a device path."""
     return "://" in device
 
 
 def _ffmpeg_command(settings: CaptureSettings, size: tuple[int, int] | None) -> list[str]:
-    """Copy MJPEG from the camera to stdout, with no decode and no re-encode. ``size`` is None
-    for a stream, whose source sets it.
+    """Copy MJPEG from the camera to stdout, with no decode and no re-encode. ``size`` is used
+    only for a device.
 
     ``mjpeg2jpeg`` adds the Huffman tables, because some UVC cameras leave them out.
     """
-    if size is None:
+    if _is_stream(settings.device):
         transport = ["-rtsp_transport", "tcp"] if settings.device.startswith("rtsp://") else []
         source = [*transport, "-i", settings.device]
     else:
+        assert size is not None
         # fmt: off
         source = [
             "-f", "v4l2", "-input_format", "mjpeg",
@@ -257,7 +258,7 @@ class Capture:
             resolution = self._resolution
             self._new_size.clear()
         size: tuple[int, int] | None
-        if is_stream(self._settings.device):
+        if _is_stream(self._settings.device):
             size = None
         elif resolution is None:
             size = _listed_size(self._settings)

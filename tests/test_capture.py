@@ -231,9 +231,11 @@ def test_the_command_copies_mjpeg_from_the_configured_camera(tmp_path: Path) -> 
     fake = install(tmp_path, [HANG])
     with capturing(fake, device="/dev/video7", frame_rate=15):
         start = wait_for(fake.starts)[0]
-    command = " ".join(start.argv)
-    assert "-f v4l2 -input_format mjpeg -framerate 15 -video_size 64x48 -i /dev/video7" in command
-    assert "-c:v copy -bsf:v mjpeg2jpeg" in command
+    assert " ".join(start.argv) == (
+        "-hide_banner -loglevel error -nostdin"
+        " -f v4l2 -input_format mjpeg -framerate 15 -video_size 64x48 -i /dev/video7"
+        " -c:v copy -bsf:v mjpeg2jpeg -flush_packets 1 -f mjpeg pipe:1"
+    )
 
 
 def test_an_http_url_is_the_input_with_no_v4l2_option(tmp_path: Path) -> None:
