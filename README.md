@@ -334,9 +334,9 @@ Rocrail does not notice a [dead or hung service](#when-the-service-dies-or-hangs
 
 ## Box
 
-`compose.yaml` runs the service and the [occupancy page](https://github.com/rails49/occupancy) behind the box's door. Both containers join the installation's `rails49` network and publish no ports. `occupancy.$BOX_DOMAIN` goes to the page, and `/live` on that host goes to the service, with the prefix kept. The page talks to the service on its own origin.
+`compose.yaml` runs the service and the [occupancy page](https://github.com/rails49/occupancy) behind the box's door. Both containers join the installation's `rails49` network and publish no ports. On a box with a box name, `compose.https.yaml` is loaded beside it: `occupancy.$BOX_DOMAIN` goes to the page over HTTPS, and `/live` on that host goes to the service, with the prefix kept. The page talks to the service on its own origin.
 
-The door also serves both on `occupancy`'s [UI port](https://github.com/rails49/installation#two-kinds-of-box), 8084, over plain HTTP, at any host. On a box with no certificate (`BOX_DOMAIN=`) that is the only way in: `http://<hostname>.local:8084` or `http://<address>:8084`. A box with a box name serves the page on 8084 too.
+The door serves both on `occupancy`'s [UI port](https://github.com/rails49/installation#two-kinds-of-box), 8084, over plain HTTP, at any host. On a box with no certificate (`BOX_DOMAIN=`) that is the only way in: `http://<hostname>.local:8084` or `http://<address>:8084`. A box with a box name serves the page on 8084 too.
 
 The box's settings for this stack are in `/etc/rails49/occupancy.env`, beside `box.env`. It holds no secret, and is written by hand:
 
@@ -353,8 +353,10 @@ The stack is started with both files:
 
 ```sh
 docker compose --env-file /etc/rails49/box.env --env-file /etc/rails49/occupancy.env \
-  -f compose.yaml up -d
+  -f compose.yaml -f compose.https.yaml up -d
 ```
+
+On a box with no box name, `-f compose.https.yaml` is left out.
 
 The installation runs first: it creates the network and runs `broker`, which the service dials on port 1883. Then, from a clone of this repository on another machine:
 
@@ -362,7 +364,7 @@ The installation runs first: it creates the network and runs `broker`, which the
 scripts/deploy.sh <user>@<box>
 ```
 
-`scripts/deploy.sh` goes over ssh to the clone at `~/occupancy-service` on the box, and stops on a box with no `occupancy.env`. It brings the clone to the head of `main` (or of the branch given after the box), and refuses a clone that is not clean. It builds both images there and starts them with both files.
+`scripts/deploy.sh` goes over ssh to the clone at `~/occupancy-service` on the box, and stops on a box with no `occupancy.env`. It brings the clone to the head of `main` (or of the branch given after the box), and refuses a clone that is not clean. It builds both images there and starts them with both settings files and `compose.https.yaml`.
 
 | Setting | Holds | Set in | Default |
 | :--- | :--- | :--- | :--- |
@@ -459,6 +461,6 @@ bin/test.sh             # Ruff, Black, Pyright and pytest
 
 `tests/test_compose.py` runs `docker compose config` and reads the project it resolves, which needs the docker CLI and no daemon. `tests/test_deploy.py` runs `scripts/deploy.sh` with a fake `ssh` that runs the box's half on this machine, and is skipped where `/etc/rails49/occupancy.env` exists. `tests/test_images.py` runs against built images, and only when `OCCUPANCY_SERVICE_IMAGE` and `OCCUPANCY_PAGE_IMAGE` name them, with `OCCUPANCY_SERVICE_COMMIT` for the revision. Its check with no camera waits 60 seconds.
 
-The `images` workflow (`.github/workflows/images.yml`) takes a commit. The installation's release workflow calls it, and it can be run by hand. For each image not yet on GHCR at that commit, it builds the image on an amd64 and an arm64 runner, runs `tests/test_images.py` against it, pushes it by digest, and joins the two under `:<commit>`. An image already there is not built again. It outputs the full commit as `commit` and both digests, as `occupancy-service` and `occupancy-page`. The caller grants `packages: write`. It uploads `compose.yaml` and `deploy/check.r49` as the artifact `occupancy-service-box-files`. The service image installs the Intel compute runtime only on amd64.
+The `images` workflow (`.github/workflows/images.yml`) takes a commit. The installation's release workflow calls it, and it can be run by hand. For each image not yet on GHCR at that commit, it builds the image on an amd64 and an arm64 runner, runs `tests/test_images.py` against it, pushes it by digest, and joins the two under `:<commit>`. An image already there is not built again. It outputs the full commit as `commit` and both digests, as `occupancy-service` and `occupancy-page`. The caller grants `packages: write`. It uploads `compose.yaml`, `compose.https.yaml` and `deploy/check.r49` as the artifact `occupancy-service-box-files`. The service image installs the Intel compute runtime only on amd64.
 
 The L1 tests use a fake capture source and the packaged model, on the CPU. The detector's tests use a fake detector, and the tests of the command a fake `detector` module on the child's path, so no AGPL package is installed. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. The tests of the real `ffmpeg` run its command line on a file, and on MJPEG and PNG streams from a local HTTP server, and are skipped when `ffmpeg` is not on the `PATH`. The MQTT tests of what goes out on the wire run a real `mosquitto`, which they start themselves on a free port with `rails49-testing`'s `Broker`. They are skipped when it is not installed, except under `CI`, where they fail. The tests of what the publisher decides run on a test connection, with no broker. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.

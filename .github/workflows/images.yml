@@ -70,12 +70,13 @@ jobs:
           done
           echo "missing=[$(IFS=,; echo "${missing[*]}")]" >> "$GITHUB_OUTPUT"
 
-      # compose.yaml and the archive the release check starts the service with.
+      # The compose files and the archive the release check starts the service with.
       - uses: actions/upload-artifact@v7
         with:
           name: occupancy-service-box-files
           path: |
             compose.yaml
+            compose.https.yaml
             deploy/check.r49
 
   build:
