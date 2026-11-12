@@ -632,3 +632,30 @@ def test_the_command_takes_the_save_flag(capsys: pytest.CaptureFixture[str]) -> 
         with pytest.raises(SystemExit):
             main([base, "--save"])
     assert "save/origin" in capsys.readouterr().out
+
+
+def no_archive(railroad: Any) -> Stub:
+    """A service with no archive, serving a frame at a size of the camera's own."""
+    return Stub(
+        manifest=json.dumps({"error": "archive/none", "railroad": railroad}).encode(),
+        manifest_status=404,
+        latest=latest_with(l1={}, scores={}),
+        frame=jpeg(WIDTH * 2, HEIGHT * 2),
+        events=[],
+    )
+
+
+@pytest.mark.parametrize("railroad", ["Gleis 49", None])
+def test_accepts_a_service_with_no_archive(railroad: str | None) -> None:
+    assert failures(no_archive(railroad)) == []
+
+
+@pytest.mark.parametrize("railroad", ["", 49])
+def test_with_no_archive_a_railroad_that_is_no_name_is_refused(railroad: Any) -> None:
+    assert failures(no_archive(railroad)) == ["archive/none"]
+
+
+def test_with_no_archive_the_sensors_of_l1_are_extra() -> None:
+    stub = no_archive(None)
+    stub.latest = answer()
+    assert "l1/extra-sensor" in failures(stub)

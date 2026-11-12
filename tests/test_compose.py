@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BOX_ENV = {"BOX_DOMAIN": "box.example"}
 
 OCCUPANCY_ENV = {
-    "OCCUPANCY_ARCHIVE": "/srv/layout.r49",
+    "OCCUPANCY_ARCHIVES": "/srv/occupancy",
     "OCCUPANCY_CAMERA": "/dev/v4l/by-id/usb-camera-video-index0",
     "TC49_UID": "1000",
     "TC49_GID": "1000",
@@ -143,11 +143,14 @@ def test_the_service_picks_its_engine_and_device(project: dict[str, Any]) -> Non
     assert [c for c in command if c.startswith(("--engine", "--device"))] == []
 
 
-def test_the_archive_is_bound_read_write_as_the_person(project: dict[str, Any]) -> None:
+def test_the_archives_folder_is_bound_read_write_as_the_person(project: dict[str, Any]) -> None:
     service = project["services"]["service"]
-    archive = [v for v in service["volumes"] if v["source"] == "/srv/layout.r49"]
-    assert len(archive) == 1
-    assert not archive[0].get("read_only")
+    archives = [v for v in service["volumes"] if v["source"] == "/srv/occupancy"]
+    assert len(archives) == 1
+    assert archives[0]["target"] == "/archives"
+    assert not archives[0].get("read_only")
+    assert archives[0]["bind"]["create_host_path"] is False
+    assert "--archive=/archives/{railroad}.r49" in service["command"]
     assert service["user"] == "1000:1000"
 
 

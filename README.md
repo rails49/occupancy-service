@@ -17,11 +17,15 @@ bin/install-hooks.sh    # refuse commits on main, and run the gate before each p
 uv run python -m occupancy_service --archive <path> --camera /dev/video0 --broker <host>:<port>
 ```
 
-This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stderr. With `--detector-model`, `L1Loop` also runs the [detector](#l0). The camera's size is the manifest's `camera.resolution`, read once at the start, so a reload that changes it needs a restart.
+This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stderr. With `--detector-model`, `L1Loop` also runs the [detector](#l0). The camera's size is the open archive's `camera.resolution`, and with no archive the largest MJPEG size `ffmpeg -list_formats` gives for the camera. Each archive `L1Loop` opens, after a save too, sets it, and a new size starts `ffmpeg` again.
+
+`--archive` may hold `{railroad}`, as in `--archive=/archives/{railroad}.r49`. Then the service starts with no archive, and opens the loaded railroad's archive once a profile's [railroad topic](#profile-files) names it. A new name, or a new stamp on the same name, opens that railroad's archive for the next frame, as a save does: `events` clients are closed at its first result. A row with `built: false` or an empty name is ignored. A name with a `/` in it has no archive. With no profile naming a railroad topic, `{railroad}` stays unfilled and the service runs with no archive. `occupancy_service.railroad` follows the topic on a connection of its own. A lost broker changes nothing, and the retained row comes again on the next connection.
+
+With no archive at the path, or none yet for the railroad, the service runs, publishes no L1 and no L0, and answers as [LIVE.md](LIVE.md#no-archive) says. A path with no `{railroad}` is the archive whatever railroad is loaded, and the railroad's name is still followed for that answer.
 
 | Flag | Goes to | Default |
 | :--- | :--- | :--- |
-| `--archive` | `L1Settings.archive`, and `LiveServer`'s archive | Required |
+| `--archive` | `L1Settings.archive`, or with `{railroad}` in it `RailroadSettings.archive` | Required |
 | `--camera` | `CaptureSettings.device` | Required |
 | `--broker <host>:<port>` | `PublisherSettings.host`, `port` | Required |
 | `--profile`, repeated | `PublisherSettings.profiles` | `occupancy` |
@@ -47,8 +51,8 @@ One log line at start names the classifier's engine and device, with the error w
 
 Each of these refuses the process: it exits 1 with one line on stderr, with no `ffmpeg` started and no port left bound. A flag that argparse refuses, such as a malformed `--broker`, exits 2.
 
-- An archive that cannot be read, which is anything `r49.load` raises, including a manifest with no `id`. Without a manifest the service has no sensors, no resolution and no archive id, so it has nothing to do, and it serves nothing. `control`'s timer per sensor reports the silence, and a restart policy picks up a repaired archive with no person restarting anything. A running service that loses its archive keeps its geometry.
-- A profile that raises `ProfileError`.
+- An archive that cannot be read, which is anything `r49.load` raises but for a path with nothing at it, including a manifest with no `id`. `control`'s timer per sensor reports the silence, and a restart policy picks up a repaired archive with no person restarting anything. A running service that loses its archive keeps its geometry. A railroad's archive that cannot be read is logged, and leaves the service with no archive.
+- A profile that raises `ProfileError`, and two active profiles that name different railroad topics.
 - An address that cannot be bound.
 
 None of these refuses it. The process starts, and the parts report and recover as they do at any other time:
@@ -151,7 +155,7 @@ A reading is in pixels of the first image and DPT is in `camera.resolution` pixe
 | `GET /live/latest?after=<frame id>` | The same, once there is a newer frame, or after about 1 s. An id from before a restart counts as older than any frame. |
 | `GET /live/latest?patches=1` | Also one PNG part per sensor with a patch, encoded only then. |
 | `GET /live/events` | Every sensor's state, then each new state or reason, with a comment line every 15 s. |
-| `GET /live/archive/<path>` | The file, through `rails49-r49`'s `image()`, from a zip or a folder. What it reports absent, or a path with a segment that starts with a dot, is a 404. |
+| `GET /live/archive/<path>` | The file, through `rails49-r49`'s `image()`, from a zip or a folder. What it reports absent, or a path with a segment that starts with a dot, is a 404. With no archive, `manifest.json` is a 404 with a [JSON body](LIVE.md#no-archive). |
 
 `PUT` and `DELETE` under `/live/archive/` [save back to a folder archive](LIVE.md#saving). `occupancy_service.archive_writer` does the writing, because `rails49-r49` only reads: each file goes to a dot-named temp file in its folder, is flushed to disk, then renamed. A saved manifest reloads the `L1Loop`. `occupancy_service.origin` holds a copy of `is_own_page` from `control`, with the code unchanged, and a change there is copied here by hand.
 
@@ -184,6 +188,7 @@ A profile is a TOML file. The `profiles` setting names each by a shipped profile
 | `repeat` | Seconds between sending every sensor, from 0. 0 means no repeat: every sensor still goes out on each connect, and anything else only if its payload differs from the last one sent for that sensor. |
 | `clear_hold_s` | Optional. Seconds to [hold](#holding-clear) a `clear`, from 0. Absent or 0 means no hold. |
 | `l0_topic` | Optional. The topic of [L0](#l0), which may hold `{archive_id}`. Absent means no L0. |
+| `railroad_topic`, `railroad_field`, `railroad_stamp` | Optional, all three or none. A topic whose JSON object names the loaded railroad, which fills `{railroad}` in `--archive`, and the fields of its name and of its build's stamp. |
 
 In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
 
@@ -242,7 +247,7 @@ state = "unknown"
 reason = "{reason}"
 ```
 
-`control`, whose contract is rails49/control#1147. `layout` has a timer per sensor, which reports a [dead or hung service](#when-the-service-dies-or-hangs) and wants every sensor at least once a second, so `repeat` leaves room for one to be late. It holds `clear` for 1 s, which rails49/occupancy-service#18 measures on real trains:
+`control`, whose contract is rails49/control#1147. `layout` has a timer per sensor, which reports a [dead or hung service](#when-the-service-dies-or-hangs) and wants every sensor at least once a second, so `repeat` leaves room for one to be late. It holds `clear` for 1 s, which rails49/occupancy-service#18 measures on real trains. It reads the loaded railroad from `tc49/layout/state/railroad` (`control/docs/BUS.md`):
 
 ```toml
 topic = "tc49/layout/sensor"
@@ -250,6 +255,9 @@ retain = false
 qos = 0
 repeat = 0.9
 clear_hold_s = 1
+railroad_topic = "tc49/layout/state/railroad"
+railroad_field = "name"
+railroad_stamp = "at"
 
 [payload.occupied]
 addr = "{sensor}"
@@ -335,7 +343,7 @@ TC49_UID=1000
 TC49_GID=1000
 VIDEO_GID=44
 RENDER_GID=992
-OCCUPANCY_ARCHIVE=/srv/rails49/layout.r49
+OCCUPANCY_ARCHIVES=/var/lib/rails49/tc49/occupancy
 OCCUPANCY_CAMERA=/dev/v4l/by-id/usb-<camera>-video-index0
 ```
 
@@ -357,7 +365,7 @@ scripts/deploy.sh <user>@<box>
 | Setting | Holds | Set in | Default |
 | :--- | :--- | :--- | :--- |
 | `BOX_DOMAIN` | The box name; empty on a box with no certificate | `box.env` | None |
-| `OCCUPANCY_ARCHIVE` | The archive's path on the box, mounted read-write | `occupancy.env` | None |
+| `OCCUPANCY_ARCHIVES` | The folder of archives on the box, one `<railroad>.r49` per railroad, mounted read-write at `/archives` | `occupancy.env` | None |
 | `OCCUPANCY_CAMERA` | The camera's path, under `/dev/v4l/by-id/` | `occupancy.env` | None |
 | `TC49_UID`, `TC49_GID` | The user and group the service runs as, so the files it saves are the person's (`id -u`, `id -g`) | `occupancy.env` | None |
 | `VIDEO_GID`, `RENDER_GID` | The host's `video` and `render` groups, for the camera and the GPU (`getent group video`, `getent group render`) | `occupancy.env` | None |
@@ -366,6 +374,8 @@ scripts/deploy.sh <user>@<box>
 Compose names a missing setting and the file it belongs in, and starts nothing.
 
 The images are `ghcr.io/rails49/occupancy-service:<commit>` and `ghcr.io/rails49/occupancy-page:<commit>`, for amd64 and arm64. The `images` workflow builds and publishes them when an [installation release](https://github.com/rails49/.github/blob/main/GLOSSARY.md) is made, and a box runs them from one. `scripts/deploy.sh` builds them on the box under the same names.
+
+The service is passed `--archive=/archives/{railroad}.r49`, so it opens the archive of the railroad `control` has loaded, and runs with none for a railroad that has none yet. On a box with `control` the folder is `<store>/occupancy`, inside `control`'s store, so the store's backup carries the archives. The folder must exist: compose does not create it.
 
 The service runs the `occupancy` and `control` profiles, pauses while control's track power is off, with OpenVINO on the GPU when the GPU is there, and on the CPU otherwise. It restarts unless stopped, so an archive that could not be read is picked up again once it is repaired. The host's `/dev` is mounted, with video devices and the GPU allowed, so a camera that is unplugged and plugged back in appears with no restart.
 

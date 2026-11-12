@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fake_ffmpeg import HANG, FakeFfmpeg, exits, install, stream
+from fake_ffmpeg import HANG, FakeFfmpeg, exits, formats, install, stream
 from fake_l1 import HEIGHT, WIDTH, jpeg, wait_for, write_archive
 from rails49_testing.broker import Broker, mosquitto, no_broker
 from rails49_testing.ports import free_port
@@ -88,7 +89,11 @@ def child_env(fake: FakeFfmpeg) -> dict[str, str]:
 
 @contextmanager
 def started(
-    tmp_path: Path, fake: FakeFfmpeg, archive: Path, broker_port: int | None = None, *extra: str
+    tmp_path: Path,
+    fake: FakeFfmpeg,
+    archive: Path | str,
+    broker_port: int | None = None,
+    *extra: str,
 ) -> Iterator[Service]:
     """The child, once ``latest`` answers. With no ``broker_port``, no broker is listening."""
     port = free_port()
@@ -292,10 +297,27 @@ def assert_refused(tmp_path: Path, archive: Path | str, *extra: str, port: int =
     return lines[0]
 
 
-def test_a_missing_path_refuses_the_process(tmp_path: Path) -> None:
-    path = tmp_path / "nothing-here"
-    line = assert_refused(tmp_path, path)
-    assert str(path) in line
+def manifest_answer(service: Service) -> tuple[int, dict[str, Any]]:
+    try:
+        with urllib.request.urlopen(f"{service.base}/archive/manifest.json", timeout=5) as answer:
+            return answer.status, json.loads(answer.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+def test_with_nothing_at_the_path_it_runs_with_no_archive_at_the_cameras_largest_size(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "bin").mkdir()
+    listed = formats("1920x1080", "3840x2160", "1280x720")
+    camera = install(tmp_path / "bin", [stream(jpeg(WIDTH * 2, HEIGHT * 2))], listed=listed)
+    with started(tmp_path, camera, tmp_path / "nothing-here") as service:
+        latest = wait_for(lambda: (answer := service.latest()).get("frame_id") and answer, 30)
+        assert latest["l1"] == {}
+        assert manifest_answer(service) == (404, {"error": "archive/none", "railroad": None})
+        assert check(service.base, timeout=5) == []
+    argv = camera.starts()[0].argv
+    assert argv[argv.index("-video_size") + 1] == "3840x2160"
 
 
 @pytest.mark.parametrize(
@@ -514,5 +536,39 @@ def test_scoring_pauses_while_the_power_topic_reads_off(
             wait_for(lambda: reasons(service) == {"track power off"}, 10)
             publisher.client.publish(topic, b'{"power": "on"}', qos=1, retain=True)
             wait_for(lambda: "track power off" not in reasons(service), 10)
+    finally:
+        publisher.close()
+
+
+def test_the_loaded_railroads_archive_is_opened_and_one_with_none_leaves_none(
+    tmp_path: Path, camera: FakeFfmpeg, broker: Broker
+) -> None:
+    archives = tmp_path / "archives"
+    archives.mkdir()
+    write_archive(archives / "Gleis 49.r49", SENSORS)
+    topic = "tc49/layout/state/railroad"
+    broker.start()
+    publisher = Subscriber(broker.port)
+
+    def load(name: str, at: str) -> None:
+        row = json.dumps({"name": name, "at": at, "built": True}).encode()
+        publisher.client.publish(topic, row, qos=1, retain=True).wait_for_publish(5)
+
+    def sensors(service: Service) -> set[str]:
+        return set(service.latest()["l1"])
+
+    try:
+        load("Gleis 49", "t1")
+        pattern = str(archives / "{railroad}.r49")
+        with started(tmp_path, camera, pattern, broker.port, "--profile", "control") as service:
+            wait_for(lambda: sensors(service) == set(SENSORS), 30)
+            assert manifest_answer(service)[0] == 200
+
+            load("Empty", "t2")
+            wait_for(lambda: sensors(service) == set(), 10)
+            assert manifest_answer(service) == (404, {"error": "archive/none", "railroad": "Empty"})
+
+            load("Gleis 49", "t3")
+            wait_for(lambda: sensors(service) == set(SENSORS), 10)
     finally:
         publisher.close()

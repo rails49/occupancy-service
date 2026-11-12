@@ -283,6 +283,10 @@ class Publisher:
             self._thread.join(_JOIN_WAIT)
             self._thread = None
 
+    @property
+    def profiles(self) -> tuple[Profile, ...]:
+        return tuple(self._profiles)
+
     def last_messages(self) -> dict[str, dict[str, LastMessage]]:
         """Sensor id to profile name to what that profile last sent for it."""
         sender = self._sender

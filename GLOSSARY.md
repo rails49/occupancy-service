@@ -60,6 +60,9 @@ A sensor's new state or new reason, or the first state of a sensor a reload brou
 **Drift**:
 `occupancy`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/occupancy/blob/main/GLOSSARY.md).
 
+**Railroad**:
+`control`'s word, owned by its [GLOSSARY.md](https://github.com/rails49/control/blob/main/GLOSSARY.md).
+
 **Box**:
 The organisation's word, owned by its [GLOSSARY.md](https://github.com/rails49/.github/blob/main/GLOSSARY.md).
 

@@ -441,9 +441,7 @@ def test_the_real_service_reports_what_it_sent_in_latest(broker: Broker, tmp_pat
         subscribed(broker) as subscriber,
         publishing(loop, settings_for(broker)) as publisher,
     ):
-        server = LiveServer(
-            ServerSettings(port=0), archive, loop, last_messages=publisher.last_messages
-        )
+        server = LiveServer(ServerSettings(port=0), loop, publisher.last_messages)
         server.start()
         try:
             source.show()

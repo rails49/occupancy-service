@@ -15,6 +15,10 @@ _SCRIPT = """#!{python}
 import json, os, sys, time
 
 here = {here!r}
+if "-list_formats" in sys.argv:
+    with open(os.path.join(here, "formats.txt")) as formats:
+        sys.stderr.write(formats.read())
+    sys.exit(1)
 with open(os.path.join(here, "starts.jsonl"), "a") as log:
     log.write(json.dumps({{"pid": os.getpid(), "time": time.time(), "argv": sys.argv[1:]}}) + "\\n")
 with open(os.path.join(here, "starts.jsonl")) as log:
@@ -97,9 +101,25 @@ class FakeFfmpeg:
         return [Start(**json.loads(line)) for line in lines if line.endswith("}")]
 
 
-def install(directory: Path, *runs: list[list[Any]]) -> FakeFfmpeg:
-    """Write a fake into ``directory``. The n-th start does ``runs[n]``; the last run repeats."""
+def formats(*sizes: str) -> str:
+    """What ``ffmpeg -list_formats compressed`` prints for a camera giving MJPEG at ``sizes``, as
+    the OBSBOT Meet 2 does. With no sizes, what it prints for no camera."""
+    if not sizes:
+        return "[in#0 @ 0x1] Error opening input: No such file or directory\n"
+    return (
+        "[video4linux2,v4l2 @ 0x1] Compressed:       mjpeg :          Motion-JPEG : "
+        + " ".join(sizes)
+        + "\n[in#0 @ 0x1] Error opening input: Immediate exit requested\n"
+    )
+
+
+def install(
+    directory: Path, *runs: list[list[Any]], listed: str = formats(f"{WIDTH}x{HEIGHT}")
+) -> FakeFfmpeg:
+    """Write a fake into ``directory``. The n-th start does ``runs[n]``; the last run repeats. A
+    run with ``-list_formats`` prints ``listed`` and is not a start."""
     (directory / "runs.json").write_text(json.dumps(runs))
+    (directory / "formats.txt").write_text(listed)
     script = directory / "ffmpeg"
     script.write_text(_SCRIPT.format(python=sys.executable, here=str(directory)))
     script.chmod(0o755)

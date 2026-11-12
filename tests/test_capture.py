@@ -17,6 +17,7 @@ from fake_ffmpeg import (
     WIDTH,
     FakeFfmpeg,
     exits,
+    formats,
     install,
     install_file_input,
     noise_jpeg,
@@ -279,3 +280,53 @@ def test_the_real_ffmpeg_turns_a_jpeg_with_no_huffman_tables_into_one_that_decod
     # Pillow's decoder fills in missing tables itself, so decoding alone would not show this.
     assert DHT in [marker for marker, _ in segments(frame.jpeg)]
     assert pixels(frame.jpeg) == pixels(original)
+
+
+def test_with_no_resolution_the_camera_opens_at_its_largest_mjpeg_size(tmp_path: Path) -> None:
+    listed = formats("1920x1080", "3840x2160", "1280x720")
+    fake = install(tmp_path, [stream(noise_jpeg())], listed=listed)
+    capture = Capture(CaptureSettings(resolution=None, ffmpeg=fake.path))
+    capture.start()
+    try:
+        wait_for(capture.latest)
+    finally:
+        capture.stop()
+
+    argv = fake.starts()[0].argv
+    assert argv[argv.index("-video_size") + 1] == "3840x2160"
+
+
+def test_with_no_resolution_and_no_size_listed_capture_waits_for_the_camera(
+    tmp_path: Path,
+) -> None:
+    fake = install(tmp_path, [stream(noise_jpeg())], listed=formats())
+    capture = Capture(CaptureSettings(resolution=None, ffmpeg=fake.path))
+    capture.start()
+    try:
+        time.sleep(1.5)
+        assert fake.starts() == []
+        assert capture.status().state == "lost"
+
+        (tmp_path / "formats.txt").write_text(formats(f"{WIDTH}x{HEIGHT}"))
+        wait_for(capture.latest)
+    finally:
+        capture.stop()
+
+
+def test_a_new_size_starts_ffmpeg_again_at_it_and_the_same_size_does_not(tmp_path: Path) -> None:
+    listed = formats("1920x1080", "3840x2160")
+    fake = install(tmp_path, [stream(noise_jpeg())], listed=listed)
+    capture = Capture(CaptureSettings(resolution=None, ffmpeg=fake.path))
+    capture.use(r49.Resolution(width=1920, height=1080))  # Before the start, as L1Loop does.
+    capture.start()
+    try:
+        wait_for(capture.latest)
+        capture.use(r49.Resolution(width=1920, height=1080))
+        capture.use(None)
+        wait_for(lambda: len(fake.starts()) == 2)
+        time.sleep(0.2)
+    finally:
+        capture.stop()
+
+    sizes = [start.argv[start.argv.index("-video_size") + 1] for start in fake.starts()]
+    assert sizes == ["1920x1080", "3840x2160"]

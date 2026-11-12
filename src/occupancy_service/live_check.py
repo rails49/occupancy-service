@@ -25,6 +25,7 @@ _TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{
 _PATCH_PART = re.compile(r"patch-\d+")
 _FOREIGN_ORIGIN = "http://live-check.invalid"
 _ABSENT_FILE = "live-check-absent.jpg"
+_NO_ARCHIVE = object()  # What ``_read_manifest`` gives for a service with no archive.
 
 
 @dataclass(frozen=True)
@@ -58,9 +59,13 @@ def check(base_url: str, timeout: float = 10, save: bool = False) -> list[Failur
     manifest, failures = _read_manifest(f"{base}/archive/manifest.json", timeout)
     if manifest is None:
         return failures
-    sensors = {sensor.id for sensor in manifest.layout.sensors}
-    resolution = manifest.camera.resolution
-    size = (resolution.width, resolution.height)
+    if manifest is _NO_ARCHIVE:
+        sensors: set[str] = set()
+        size = None  # With no archive, a frame is at the camera's own size.
+    else:
+        sensors = {sensor.id for sensor in manifest.layout.sensors}
+        resolution = manifest.camera.resolution
+        size = (resolution.width, resolution.height)
 
     def check_latest(query: str) -> dict[str, Any]:
         """Add what is wrong with this answer to ``failures``, and return its JSON fields."""
@@ -79,17 +84,28 @@ def check(base_url: str, timeout: float = 10, save: bool = False) -> list[Failur
         if "patches" in with_patches and after.get("frame_id") and "patches" not in after:
             failures.append(Failure("patches/after", "patches=1 stops working alongside after"))
     failures.extend(_events_failures(f"{base}/events", sensors, timeout))
-    if save:
+    if save and manifest is not _NO_ARCHIVE:
         failures.extend(_save_failures(f"{base}/archive", timeout))
     return list(dict.fromkeys(failures))
 
 
-def _read_manifest(url: str, timeout: float) -> tuple[r49.Manifest | None, list[Failure]]:
-    """The manifest, or None when it cannot be read, and what is wrong with the answer."""
+def _read_manifest(url: str, timeout: float) -> tuple[Any, list[Failure]]:
+    """The manifest, ``_NO_ARCHIVE`` when the service has none, or None when it cannot be read,
+    and what is wrong with the answer."""
     try:
         status, headers, body = _get(url, timeout)
     except _Broken as broken:
         return None, [broken.failure]
+    if status == 404:
+        try:
+            answer = _parse_json(body)
+        except ValueError:
+            answer = None
+        if isinstance(answer, dict) and answer.get("error") == "archive/none":
+            railroad = answer.get("railroad")
+            if railroad is not None and not _is_text(railroad):
+                return _NO_ARCHIVE, [Failure("archive/none", f"railroad is {railroad!r}")]
+            return _NO_ARCHIVE, []
     if status != 200:
         return None, [Failure("archive/status", f"GET {url} answered {status}")]
     failures = []
@@ -130,7 +146,10 @@ def _fetch_latest(url: str, timeout: float) -> tuple[dict[str, Any], dict[str, _
 
 
 def _latest_failures(
-    fields: dict[str, Any], parts: dict[str, _Part], sensors: set[str], size: tuple[int, int]
+    fields: dict[str, Any],
+    parts: dict[str, _Part],
+    sensors: set[str],
+    size: tuple[int, int] | None,
 ) -> Iterator[Failure]:
     version = fields.get("version")
     if type(version) is not int or version != 1:
@@ -165,7 +184,8 @@ def _latest_failures(
     yield from _patches_failures(fields, parts)
 
 
-def _frame_failures(frame: _Part, size: tuple[int, int]) -> Iterator[Failure]:
+def _frame_failures(frame: _Part, size: tuple[int, int] | None) -> Iterator[Failure]:
+    """What is wrong with the frame part. With ``size`` None, a frame of any size will do."""
     if not frame.filename:
         yield Failure("frame/no-filename", "the frame part has no filename")
     try:
@@ -181,7 +201,7 @@ def _frame_failures(frame: _Part, size: tuple[int, int]) -> Iterator[Failure]:
         return
     if not jpeg_format:
         yield Failure("frame/jpeg", "the frame part is not a JPEG")
-    if found != size:
+    if size is not None and found != size:
         yield Failure("frame/size", f"the frame is {found}, and camera.resolution is {size}")
 
 
@@ -496,7 +516,8 @@ def _get(url: str, timeout: float) -> tuple[int, Message, bytes]:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             return response.status, response.headers, response.read()
     except urllib.error.HTTPError as error:
-        return error.code, error.headers, b""
+        with error:
+            return error.code, error.headers, error.read()
     except (OSError, HTTPException) as error:
         raise _Broken("http/unreachable", f"GET {url} failed: {error}") from None
 

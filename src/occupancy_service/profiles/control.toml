@@ -6,6 +6,10 @@ qos = 0
 repeat = 0.9
 # Control takes a long enough clear on an entry sensor for a train's tail: rails49/control#1165.
 clear_hold_s = 1
+# The loaded railroad, which names its archive: control/docs/BUS.md.
+railroad_topic = "tc49/layout/state/railroad"
+railroad_field = "name"
+railroad_stamp = "at"
 
 [payload.occupied]
 addr = "{sensor}"

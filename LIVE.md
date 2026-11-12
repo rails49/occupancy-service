@@ -30,7 +30,7 @@ The answer is `multipart/form-data`, with everything from one frame.
 | Part | Required | Holds |
 | :--- | :--- | :--- |
 | `json` | yes | The fields below, with no `filename`, so a reader gets it as a string |
-| `frame` | when there is a frame | The captured JPEG at `camera.resolution`, with a `filename` |
+| `frame` | when there is a frame | The captured JPEG at `camera.resolution`, or with [no archive](#no-archive) at the camera's own size, with a `filename` |
 | `patch-0`, `patch-1`, ... | with `?patches=1`, when offered | One image per sensor's patch, each with a `filename`, and its type in `Content-Type` |
 
 A binary part needs its `filename` because of `response.formData()`: without one, Chromium 156 rejects the whole answer and WebKit 27.2 returns an empty string.
@@ -247,6 +247,18 @@ data: {"sensor": "C3.B", "state": "unknown", "reason": "no frames"}
 
 Serves the archive in the URL form of rails49/r49#60: `<base>/archive/manifest.json` and `<base>/archive/<filename>`. `manifest.json` has the content type `application/json`.
 
+### No archive
+
+A service may run with no archive. Then `GET <base>/archive/manifest.json` answers 404 with a JSON body:
+
+```json
+{"error": "archive/none", "railroad": "Gleis 49"}
+```
+
+`railroad` is the name of the loaded railroad, or `null` when the service knows none. Every other file under `<base>/archive/` is 404, and `PUT` and `DELETE` answer 405.
+
+`latest` answers with an empty `l1`, and still carries each frame, so a page can make the railroad's first archive from it. With no `camera.resolution`, a frame is at the camera's own size. `events` sends no event.
+
 ## Saving
 
 Saving back to the archive is optional. A service offers it when the archive is a folder it can write to. `GET <base>/archive/manifest.json` then carries a strong `ETag`: the SHA-256 of the file's bytes, in hex, in double quotes.
@@ -297,7 +309,7 @@ One command checks a running implementation against this document:
 uvx --from git+https://github.com/rails49/occupancy-service live-check <base>
 ```
 
-It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. If it cannot read the manifest it stops there, because the other rules need it.
+It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. If it cannot read the manifest it stops there, because the other rules need it. With [no archive](#no-archive) it checks the rest with no sensors, and skips `--save`.
 
 With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. Without the flag it writes nothing.
 
@@ -306,7 +318,8 @@ It checks format and consistency only, so it does not run the [drift cases](#dri
 | Rule | Broken by |
 | :--- | :--- |
 | `http/unreachable` | A required URL does not answer. |
-| `archive/status` | `manifest.json` does not answer 200. |
+| `archive/status` | `manifest.json` answers neither 200 nor [no archive](#no-archive)'s 404. |
+| `archive/none` | A 404 with `archive/none` has a `railroad` that is neither a non-empty string nor `null`. |
 | `archive/content-type` | `manifest.json` is not `application/json`. |
 | `archive/manifest` | The published `rails49-r49` refuses `manifest.json`. |
 | `latest/status` | `latest` does not answer 200. |
@@ -320,7 +333,7 @@ It checks format and consistency only, so it does not run the [drift cases](#dri
 | `latest/no-frame-parts` | No frame part, and a part other than `json`. |
 | `frame/no-filename` | The `frame` part has no `filename`. |
 | `frame/jpeg` | The `frame` part does not decode as a JPEG. |
-| `frame/size` | The frame is not at `camera.resolution`. |
+| `frame/size` | The frame is not at `camera.resolution`. Not checked with no archive. |
 | `l1/shape` | `l1` is not an object. |
 | `l1/missing-sensor` | A sensor in the manifest has no entry. |
 | `l1/extra-sensor` | An entry names a sensor not in the manifest. |
