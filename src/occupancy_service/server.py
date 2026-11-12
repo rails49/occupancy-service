@@ -23,7 +23,13 @@ from PIL import Image
 
 from occupancy_service.active_profile import LastMessage
 from occupancy_service.archive_writer import MANIFEST as _MANIFEST
-from occupancy_service.archive_writer import ArchiveWriter, Refused, can_name, etag_of
+from occupancy_service.archive_writer import (
+    ArchiveCreator,
+    ArchiveWriter,
+    Refused,
+    can_name,
+    etag_of,
+)
 from occupancy_service.capture import CaptureStatus, Frame
 from occupancy_service.drift import DriftReading, DriftUnmeasured
 from occupancy_service.l0 import L0, l0_json
@@ -36,6 +42,7 @@ _BASE = "/live"
 _LATEST = f"{_BASE}/latest"
 _EVENTS = f"{_BASE}/events"
 _ARCHIVE = f"{_BASE}/archive/"
+_CREATE = f"{_BASE}/archive.r49"
 _AFTER_WAIT = 1.0  # Seconds ``after`` waits for a newer frame.
 _AFTER_POLL = 0.01  # Seconds between looks for one, as often as the loop looks for a new frame.
 _EVENTS_BUFFER = 1 << 16  # Bytes the system holds for an ``events`` client that is not reading.
@@ -71,18 +78,26 @@ class LiveServer:
         loop: L1Loop,
         last_messages: Callable[[], Mapping[str, Mapping[str, LastMessage]]] | None = None,
         railroad: Callable[[], str | None] | None = None,
+        archive: str | None = None,
     ) -> None:
         """Binds the address, and raises the ``OSError`` when it cannot.
 
         ``last_messages`` is a ``Publisher``'s, and without it ``latest`` has no such field.
         ``railroad`` gives the loaded railroad's name, None when none is known, for the answer
-        with no archive. Without it no railroad is known.
+        with no archive and for the path of one to create. Without it no railroad is known.
+        ``archive`` is the archive's path, with ``{railroad}`` in it or not, where an archive may
+        be created. Without it none is.
         """
         self.settings = settings
         self.loop = loop
         self.last_messages = last_messages
         self.railroad = railroad
         self.writer = ArchiveWriter(lambda: loop.archive, loop.reload)
+        self.creator = (
+            None
+            if archive is None
+            else ArchiveCreator(archive, railroad or (lambda: None), loop.open)
+        )
         self.stopping = threading.Event()
         # A frame's id starts again at 1 on a restart, and a reader's id from before one must not
         # read as a frame still to come.
@@ -151,7 +166,10 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True  # The client has gone, or is not reading.
 
     def do_PUT(self) -> None:
-        self._write(self._put)
+        if self.path.partition("?")[0] == _CREATE:
+            self._create()
+        else:
+            self._write(self._put)
 
     def do_DELETE(self) -> None:
         self._write(self._delete)
@@ -282,6 +300,31 @@ class _Handler(BaseHTTPRequestHandler):
                 self._refuse(refused.status, refused.rule)
             except (r49.R49Error, OSError):
                 _log.exception("%s %r failed", self.command, path)
+                self._refuse(500)
+        except OSError:
+            self.close_connection = True  # The client has gone, or is not reading.
+
+    def _create(self) -> None:
+        """Make the checks of a create, in the order LIVE.md lists them, and then create."""
+        self._unread = _body_length(self.headers)
+        creator = self.live.creator
+        try:
+            try:
+                if creator is None or not creator.offered():
+                    self._refuse(405, allow="GET")
+                    return
+                if not _own_page(self.headers.get("Origin"), self.headers.get("Host")):
+                    raise Refused(403)
+                if self.headers.get("If-None-Match") != "*":
+                    raise Refused(428)
+                creator.check_absent()
+                if self._unread is None or "Content-Length" not in self.headers:
+                    raise Refused(411)
+                self._no_content(creator.create(self._body()))
+            except Refused as refused:
+                self._refuse(refused.status, refused.rule)
+            except (r49.R49Error, OSError):
+                _log.exception("creating the archive failed")
                 self._refuse(500)
         except OSError:
             self.close_connection = True  # The client has gone, or is not reading.

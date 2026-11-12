@@ -20,6 +20,7 @@ Nothing here is a safety interlock.
 | `GET <base>/events` | yes | Every [L1 change](GLOSSARY.md#l1-change) |
 | `<base>/archive/` | yes | The archive |
 | `PUT` and `DELETE` under `<base>/archive/` | no | [Saving](#saving) back to the archive |
+| `PUT <base>/archive.r49` | no | [Creating an archive](#creating-an-archive) where there is none |
 
 MQTT is not in the contract. The [README](README.md#mqtt) documents the profiles.
 
@@ -255,7 +256,7 @@ A service may run with no archive. Then `GET <base>/archive/manifest.json` answe
 {"error": "archive/none", "railroad": "Gleis 49"}
 ```
 
-`railroad` is the name of the loaded railroad, or `null` when the service knows none. Every other file under `<base>/archive/` is 404, and `PUT` and `DELETE` answer 405.
+`railroad` is the name of the loaded railroad, or `null` when the service knows none. Every other file under `<base>/archive/` is 404, and `PUT` and `DELETE` under it answer 405. A page may [create an archive](#creating-an-archive).
 
 `latest` answers with an empty `l1`, and still carries each frame, so a page can make the railroad's first archive from it. With no `camera.resolution`, a frame is at the camera's own size. `events` sends no event.
 
@@ -301,6 +302,26 @@ Under `<base>/archive/<path>`, checked in this order:
 - `events` clients are closed at the first result under the new manifest. A reader treats a connect as the full list of sensors.
 - The service does not watch the folder. A hand edit takes effect at restart, and a page holding the earlier copy is refused.
 
+### Creating an archive
+
+`PUT <base>/archive.r49`, with a `.r49` zip as the body and `If-None-Match: *`, creates the archive where there is none. A service offers it when it can write to the archive's folder. The archive's path may depend on the loaded railroad.
+
+Checked in this order:
+
+| Status | When |
+| :--- | :--- |
+| 405 | The service cannot write to the archive's folder. The answer has `Allow: GET`. |
+| 403 | The `Origin` is foreign, as for [every write](#every-write). |
+| 428 | There is no `If-None-Match: *`. |
+| 409 | The archive's path depends on the loaded railroad, and none is loaded. |
+| 412 | An archive exists. |
+| 411 | There is no `Content-Length`. |
+| 422 | The zip is refused, with the rule in a JSON `error` field: a rule of [r49's FORMAT.md](https://github.com/rails49/r49/blob/main/FORMAT.md) that `rails49-r49` applies when it loads the zip, or `images/missing`. An archive of a newer format is refused under its rule. |
+
+204 carries the new manifest's `ETag`, as `GET manifest.json` gives it, for the page's next save to send in `If-Match`.
+
+The zip is unpacked into a folder beside the archive's path and renamed to it. A refused or failed create leaves nothing there. A file whose name has a segment that starts with a dot, or that would leave the folder, is not unpacked. Of two creates at once, one succeeds and the other gets 412. The next frame scored uses the new archive.
+
 ## Conformance
 
 One command checks a running implementation against this document:
@@ -309,9 +330,9 @@ One command checks a running implementation against this document:
 uvx --from git+https://github.com/rails49/occupancy-service live-check <base>
 ```
 
-It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. If it cannot read the manifest it stops there, because the other rules need it. With [no archive](#no-archive) it checks the rest with no sensors, and skips `--save`.
+It exits non-zero and names each broken rule. It accepts an implementation that omits every optional field, and checks an optional field's shape when present. If it cannot read the manifest it stops there, because the other rules need it. With [no archive](#no-archive) it checks the rest with no sensors, and `--save` checks only the create.
 
-With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. Without the flag it writes nothing.
+With `--save` it also checks saving: 428, 412, 403 and 422, and that a rewrite of the same bytes succeeds. With no `ETag` it checks for 405. It tries each of these on `manifest.json`, so run it with care on an archive that matters: a service that wrongly accepts the refused manifest has it overwritten, and then put back. It checks creating with a body that is no zip, for 428 and 403. Over the archive it read, it checks for 412. With no archive, it checks for 422, or for 409 when no railroad is loaded. A service that answers 405 with `Allow: GET` does not offer creating. A service that wrongly accepts that body has it as its archive. Without the flag it writes nothing.
 
 It checks format and consistency only, so it does not run the [drift cases](#drift-cases) or the [L1 cases](#l1-cases). Timing rules need control of a camera, so they stay in rails49/occupancy-service#2 and rails49/occupancy-service#5. It checks the answer the service gives at that moment, so run it with the camera on and off to cover both forms of `latest`.
 
@@ -368,5 +389,10 @@ It checks format and consistency only, so it does not run the [drift cases](#dri
 | `save/origin` | With `--save`, a save with a foreign `Origin` does not answer 403. |
 | `save/manifest-refused` | With `--save`, a manifest with no version does not answer 422 with a JSON `error` field. |
 | `save/rewrite` | With `--save`, a rewrite of the same bytes does not answer 204 with the same `ETag`. |
+| `create/not-offered` | With `--save`, a create answers 405 with no `Allow: GET`. |
+| `create/if-none-match-missing` | With `--save`, a create with no `If-None-Match` does not answer 428. |
+| `create/origin` | With `--save`, a create with a foreign `Origin` does not answer 403. |
+| `create/exists` | With `--save`, a create over the archive it read does not answer 412. |
+| `create/refused` | With `--save` and no archive, a create of a body that is no zip does not answer 422 with a JSON `error` field, or 409 with no railroad loaded. |
 
 An event breaks the `l1/` rules as an entry in `latest` does.

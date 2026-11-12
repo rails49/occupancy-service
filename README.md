@@ -157,7 +157,7 @@ A reading is in pixels of the first image and DPT is in `camera.resolution` pixe
 | `GET /live/events` | Every sensor's state, then each new state or reason, with a comment line every 15 s. |
 | `GET /live/archive/<path>` | The file, through `rails49-r49`'s `image()`, from a zip or a folder. What it reports absent, or a path with a segment that starts with a dot, is a 404. With no archive, `manifest.json` is a 404 with a [JSON body](LIVE.md#no-archive). |
 
-`PUT` and `DELETE` under `/live/archive/` [save back to a folder archive](LIVE.md#saving). `occupancy_service.archive_writer` does the writing, because `rails49-r49` only reads: each file goes to a dot-named temp file in its folder, is flushed to disk, then renamed. A saved manifest reloads the `L1Loop`. `occupancy_service.origin` holds a copy of `is_own_page` from `control`, with the code unchanged, and a change there is copied here by hand.
+`PUT` and `DELETE` under `/live/archive/` [save back to a folder archive](LIVE.md#saving). `occupancy_service.archive_writer` does the writing, because `rails49-r49` only reads: each file goes to a dot-named temp file in its folder, is flushed to disk, then renamed. A saved manifest reloads the `L1Loop`. `PUT /live/archive.r49` [creates the archive](LIVE.md#creating-an-archive) at `--archive`'s path, the loaded railroad's name in place of `{railroad}`, where nothing is: `ArchiveCreator` writes the zip to a dot-named temp file, unpacks it into a dot-named folder beside that path, and renames the folder to it. The `L1Loop` then opens it. `occupancy_service.origin` holds a copy of `is_own_page` from `control`, with the code unchanged, and a change there is copied here by hand.
 
 `latest`, `events` and `manifest.json` are `no-store`. `frame_id` holds a token for this run of the service, and readers treat it as opaque.
 
@@ -375,7 +375,7 @@ Compose names a missing setting and the file it belongs in, and starts nothing.
 
 The images are `ghcr.io/rails49/occupancy-service:<commit>` and `ghcr.io/rails49/occupancy-page:<commit>`, for amd64 and arm64. The `images` workflow builds and publishes them when an [installation release](https://github.com/rails49/.github/blob/main/GLOSSARY.md) is made, and a box runs them from one. `scripts/deploy.sh` builds them on the box under the same names.
 
-The service is passed `--archive=/archives/{railroad}.r49`, so it opens the archive of the railroad `control` has loaded, and runs with none for a railroad that has none yet. On a box with `control` the folder is `<store>/occupancy`, inside `control`'s store, so the store's backup carries the archives. The folder must exist: compose does not create it.
+The service is passed `--archive=/archives/{railroad}.r49`, so it opens the archive of the railroad `control` has loaded, and runs with none for a railroad that has none yet. A page creates that railroad's archive in the folder with `PUT /live/archive.r49`. On a box with `control` the folder is `<store>/occupancy`, inside `control`'s store, so the store's backup carries the archives. The folder must exist: compose does not create it.
 
 The service runs the `occupancy` and `control` profiles, pauses while control's track power is off, with OpenVINO on the GPU when the GPU is there, and on the CPU otherwise. It restarts unless stopped, so an archive that could not be read is picked up again once it is repaired. The host's `/dev` is mounted, with video devices and the GPU allowed, so a camera that is unplugged and plugged back in appears with no restart.
 

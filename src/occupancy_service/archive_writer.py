@@ -3,6 +3,7 @@
 import hashlib
 import os
 import secrets
+import shutil
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
@@ -10,6 +11,8 @@ from pathlib import Path
 
 import r49
 from r49.manifest import stays_in_archive
+
+from occupancy_service.railroad import PLACEHOLDER, archive_for
 
 MANIFEST = "manifest.json"
 _ID_CHANGED = "manifest/id"
@@ -140,3 +143,83 @@ def _temp_beside(target: Path, body: Iterable[bytes]) -> Iterator[Path]:
         yield temp
     finally:
         temp.unlink(missing_ok=True)
+
+
+class ArchiveCreator:
+    """Creates the archive at ``pattern``, with the name ``railroad()`` gives in place of any
+    ``{railroad}``, and calls ``opened`` with its path once it is in place.
+
+    The zip is checked as a saved manifest is, unpacked into a dot-named folder beside the
+    archive's path, each file flushed to disk, and renamed to that path. An ``OSError`` or
+    ``R49Error`` raised before the rename leaves neither behind. One raised by ``opened`` comes
+    after it: the archive stays on disk, and the create still answers 500. One lock covers the
+    look for an archive at the path and the rename, so that of two creates only the first
+    succeeds.
+    """
+
+    def __init__(
+        self, pattern: str, railroad: Callable[[], str | None], opened: Callable[[Path], None]
+    ) -> None:
+        self._pattern = pattern
+        self._railroad = railroad
+        self._opened = opened
+        self._lock = threading.Lock()
+
+    def offered(self) -> bool:
+        """Whether the archive's folder is one this process can write to, as of now."""
+        folder = Path(self._pattern).parent
+        return folder.is_dir() and os.access(folder, os.W_OK | os.X_OK)
+
+    def check_absent(self) -> Path:
+        """The archive's path. Refused with 409 when it needs a railroad and none is loaded, and
+        with 412 while something is at it."""
+        target = self._target()
+        if target is None:
+            raise Refused(409)
+        if os.path.lexists(target):
+            raise Refused(412)
+        return target
+
+    def create(self, body: Iterable[bytes]) -> str:
+        """Put the zip ``body`` in place as the archive, and open it. Its manifest's ETag."""
+        target = self.check_absent()
+        unpacked = target.parent / f".{secrets.token_hex(8)}.new"
+        try:
+            with _temp_beside(target, body) as zipped:
+                try:
+                    _unpack(r49.load(zipped), unpacked)
+                    mismatches = r49.load(unpacked).image_mismatches()
+                except r49.R49Error as error:
+                    raise Refused(422, error.rule) from None
+            if any(mismatch.rule == _IMAGE_MISSING for mismatch in mismatches):
+                raise Refused(422, _IMAGE_MISSING)
+            with self._lock:
+                self.check_absent()
+                unpacked.rename(target)
+        finally:
+            shutil.rmtree(unpacked, ignore_errors=True)
+        etag = etag_of((target / MANIFEST).read_bytes())
+        if self._target() == target:  # Unless another railroad was loaded meanwhile.
+            self._opened(target)
+        return etag
+
+    def _target(self) -> Path | None:
+        if PLACEHOLDER not in self._pattern:
+            return Path(self._pattern)
+        name = self._railroad()
+        path = None if name is None else archive_for(self._pattern, name)
+        return None if path is None else Path(path)
+
+
+def _unpack(archive: r49.R49Archive, folder: Path) -> None:
+    """Write each of ``archive``'s files that a folder can hold into ``folder``, made here."""
+    folder.mkdir()
+    for name in archive.entries():
+        if can_name(name):
+            body = archive.image(name)
+            assert body is not None  # It is one of the entries.
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            with (folder / name).open("xb") as out:
+                out.write(body)
+                out.flush()
+                os.fsync(out.fileno())

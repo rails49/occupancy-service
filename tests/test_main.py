@@ -1,6 +1,7 @@
 """``python -m occupancy_service`` as a real child process, with a fake ``ffmpeg`` on the ``PATH``
 and a real ``mosquitto`` where a broker is named."""
 
+import io
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -572,3 +574,19 @@ def test_the_loaded_railroads_archive_is_opened_and_one_with_none_leaves_none(
             wait_for(lambda: sensors(service) == set(SENSORS), 10)
     finally:
         publisher.close()
+
+
+def test_a_create_at_the_archives_path_is_opened(tmp_path: Path, camera: FakeFfmpeg) -> None:
+    source = write_archive(tmp_path / "source", SENSORS)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zipped:
+        zipped.write(source / "manifest.json", "manifest.json")
+    (tmp_path / "archives").mkdir()
+    with started(tmp_path, camera, tmp_path / "archives" / "layout.r49") as service:
+        request = urllib.request.Request(
+            f"{service.base}/archive.r49", out.getvalue(), {"If-None-Match": "*"}, method="PUT"
+        )
+        with urllib.request.urlopen(request, timeout=5) as answer:
+            assert answer.status == 204
+        assert manifest_answer(service)[0] == 200
+        wait_for(lambda: set(service.latest()["l1"]) == set(SENSORS), 30)

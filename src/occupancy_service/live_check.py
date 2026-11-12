@@ -25,7 +25,7 @@ _TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{
 _PATCH_PART = re.compile(r"patch-\d+")
 _FOREIGN_ORIGIN = "http://live-check.invalid"
 _ABSENT_FILE = "live-check-absent.jpg"
-_NO_ARCHIVE = object()  # What ``_read_manifest`` gives for a service with no archive.
+_NOT_A_ZIP = b"live-check: not a zip"
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,13 @@ class Failure:
 
     rule: str
     message: str
+
+
+@dataclass(frozen=True)
+class _NoArchive:
+    """What ``_read_manifest`` gives for a service with no archive."""
+
+    railroad: str | None
 
 
 @dataclass(frozen=True)
@@ -53,13 +60,14 @@ class _Broken(Exception):
 def check(base_url: str, timeout: float = 10, save: bool = False) -> list[Failure]:
     """Every rule the implementation at ``base_url`` breaks. Empty when it conforms.
 
-    Only with ``save`` does this write, and then only ``manifest.json``, with the bytes it holds.
+    Only with ``save`` does this write: ``manifest.json``, with the bytes it holds, and
+    ``archive.r49``, with a body that is no zip.
     """
     base = base_url.rstrip("/")
     manifest, failures = _read_manifest(f"{base}/archive/manifest.json", timeout)
     if manifest is None:
         return failures
-    if manifest is _NO_ARCHIVE:
+    if isinstance(manifest, _NoArchive):
         sensors: set[str] = set()
         size = None  # With no archive, a frame is at the camera's own size.
     else:
@@ -84,13 +92,16 @@ def check(base_url: str, timeout: float = 10, save: bool = False) -> list[Failur
         if "patches" in with_patches and after.get("frame_id") and "patches" not in after:
             failures.append(Failure("patches/after", "patches=1 stops working alongside after"))
     failures.extend(_events_failures(f"{base}/events", sensors, timeout))
-    if save and manifest is not _NO_ARCHIVE:
-        failures.extend(_save_failures(f"{base}/archive", timeout))
+    if save:
+        if not isinstance(manifest, _NoArchive):
+            failures.extend(_save_failures(f"{base}/archive", timeout))
+        no_archive = manifest if isinstance(manifest, _NoArchive) else None
+        failures.extend(_create_failures(f"{base}/archive.r49", no_archive, timeout))
     return list(dict.fromkeys(failures))
 
 
 def _read_manifest(url: str, timeout: float) -> tuple[Any, list[Failure]]:
-    """The manifest, ``_NO_ARCHIVE`` when the service has none, or None when it cannot be read,
+    """The manifest, a ``_NoArchive`` when the service has none, or None when it cannot be read,
     and what is wrong with the answer."""
     try:
         status, headers, body = _get(url, timeout)
@@ -104,8 +115,8 @@ def _read_manifest(url: str, timeout: float) -> tuple[Any, list[Failure]]:
         if isinstance(answer, dict) and answer.get("error") == "archive/none":
             railroad = answer.get("railroad")
             if railroad is not None and not _is_text(railroad):
-                return _NO_ARCHIVE, [Failure("archive/none", f"railroad is {railroad!r}")]
-            return _NO_ARCHIVE, []
+                return _NoArchive(None), [Failure("archive/none", f"railroad is {railroad!r}")]
+            return _NoArchive(railroad), []
     if status != 200:
         return None, [Failure("archive/status", f"GET {url} answered {status}")]
     failures = []
@@ -342,6 +353,37 @@ def _offered_failures(url: str, etag: str, manifest: bytes, timeout: float) -> l
         message = f"a rewrite of the same bytes gave the ETag {headers.get('ETag')}, not {etag}"
         failures.append(Failure("save/rewrite", message))
     return failures
+
+
+def _create_failures(url: str, no_archive: _NoArchive | None, timeout: float) -> list[Failure]:
+    """What is wrong with creating an archive, with a body no service may take. Over an archive
+    the last create is refused with 412; with none, with 422, or 409 with no railroad loaded."""
+    try:
+        status, headers, _ = _send("PUT", url, timeout, _NOT_A_ZIP)
+        if status == 405:
+            if headers.get("Allow") == "GET":
+                return []
+            return [Failure("create/not-offered", f"405 with Allow {headers.get('Allow')!r}")]
+        failures = []
+
+        def refused(rule: str, status: int, want: int, how: str) -> None:
+            if status != want:
+                failures.append(Failure(rule, f"{how} answered {status}, not {want}"))
+
+        refused("create/if-none-match-missing", status, 428, "a create with no If-None-Match")
+        create = {"If-None-Match": "*"}
+        foreign = _send("PUT", url, timeout, _NOT_A_ZIP, create | {"Origin": _FOREIGN_ORIGIN})
+        refused("create/origin", foreign[0], 403, "a create with a foreign Origin")
+        status, _, body = _send("PUT", url, timeout, _NOT_A_ZIP, create)
+        if no_archive is None:
+            refused("create/exists", status, 412, "a create over the archive it read")
+        elif not (status == 409 and no_archive.railroad is None):
+            refused("create/refused", status, 422, "a create of a body that is no zip")
+            if status == 422 and not _has_error_field(body):
+                failures.append(Failure("create/refused", "a 422 has no JSON error field"))
+        return failures
+    except _Broken as broken:
+        return [broken.failure]
 
 
 def _has_error_field(body: bytes) -> bool:
