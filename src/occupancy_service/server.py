@@ -94,7 +94,7 @@ class LiveServer:
         self.loop = loop
         self.last_messages = last_messages
         self.railroad = railroad
-        self.follows_railroad = archive is not None and PLACEHOLDER in archive
+        self.path_names_railroad = archive is not None and PLACEHOLDER in archive
         self.writer = ArchiveWriter(lambda: loop.archive, loop.reload)
         self.creator = (
             None
@@ -259,7 +259,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             answer: dict[str, str | None] = {"error": _NO_ARCHIVE}
-            if self.live.follows_railroad:
+            if self.live.path_names_railroad:
                 answer["railroad"] = None if self.live.railroad is None else self.live.railroad()
             body = _json(answer)
             self._reply(body, "application/json", no_store=True, status=404)

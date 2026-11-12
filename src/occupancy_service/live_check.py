@@ -38,11 +38,11 @@ class Failure:
 
 @dataclass(frozen=True)
 class _NoArchive:
-    """What ``_read_manifest`` gives for a service with no archive. ``follows`` is whether the
-    answer names a railroad, as one whose archive's path depends on the railroad does."""
+    """What ``_read_manifest`` gives for a service with no archive. ``names_railroad`` is whether
+    the answer has a ``railroad``, as one whose archive's path holds ``{railroad}`` does."""
 
     railroad: str | None
-    follows: bool
+    names_railroad: bool
 
 
 @dataclass(frozen=True)
@@ -115,13 +115,13 @@ def _read_manifest(url: str, timeout: float) -> tuple[Any, list[Failure]]:
         except ValueError:
             answer = None
         if isinstance(answer, dict) and answer.get("error") == "archive/none":
-            follows = "railroad" in answer
+            names_railroad = "railroad" in answer
             railroad = answer.get("railroad")
             if railroad is not None and not _is_text(railroad):
-                return _NoArchive(None, follows), [
+                return _NoArchive(None, names_railroad), [
                     Failure("archive/none", f"railroad is {railroad!r}")
                 ]
-            return _NoArchive(railroad, follows), []
+            return _NoArchive(railroad, names_railroad), []
     if status != 200:
         return None, [Failure("archive/status", f"GET {url} answered {status}")]
     failures = []
@@ -362,8 +362,8 @@ def _offered_failures(url: str, etag: str, manifest: bytes, timeout: float) -> l
 
 def _create_failures(url: str, no_archive: _NoArchive | None, timeout: float) -> list[Failure]:
     """What is wrong with creating an archive, with a body no service may take. Over an archive
-    the last create is refused with 412; with none, with 422, or 409 when the answer names no
-    railroad loaded."""
+    the last create is refused with 412; with none, with 422, or 409 when the answer has
+    ``"railroad": null``."""
     try:
         status, headers, _ = _send("PUT", url, timeout, _NOT_A_ZIP)
         if status == 405:
@@ -383,7 +383,7 @@ def _create_failures(url: str, no_archive: _NoArchive | None, timeout: float) ->
         status, _, body = _send("PUT", url, timeout, _NOT_A_ZIP, create)
         if no_archive is None:
             refused("create/exists", status, 412, "a create over the archive it read")
-        elif not (status == 409 and no_archive.follows and no_archive.railroad is None):
+        elif not (status == 409 and no_archive.names_railroad and no_archive.railroad is None):
             refused("create/refused", status, 422, "a create of a body that is no zip")
             if status == 422 and not _has_error_field(body):
                 failures.append(Failure("create/refused", "a 422 has no JSON error field"))
