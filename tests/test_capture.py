@@ -1,4 +1,5 @@
-"""Capture against a fake ``ffmpeg``: frames, and a camera that goes away and comes back."""
+"""Capture against a fake ``ffmpeg``: frames, and a camera that goes away and comes back. The
+real ``ffmpeg``, where there is one, against a file and a local HTTP stream."""
 
 import io
 import os
@@ -24,6 +25,7 @@ from fake_ffmpeg import (
     send,
     stream,
 )
+from mjpeg_server import MjpegServer, serving
 from PIL import Image
 
 from occupancy_service.capture import Capture, CaptureSettings, CaptureStatus, Frame
@@ -234,6 +236,38 @@ def test_the_command_copies_mjpeg_from_the_configured_camera(tmp_path: Path) -> 
     assert "-c:v copy -bsf:v mjpeg2jpeg" in command
 
 
+def test_an_http_url_is_the_input_with_no_v4l2_option(tmp_path: Path) -> None:
+    fake = install(tmp_path, [HANG])
+    with capturing(fake, device="http://camera.local:8080/stream"):
+        argv = wait_for(fake.starts)[0].argv
+    input_at = argv.index("-i")
+    assert argv[input_at + 1] == "http://camera.local:8080/stream"
+    for option in ("v4l2", "-input_format", "-framerate", "-video_size", "-rtsp_transport"):
+        assert option not in argv
+    assert " ".join(argv[input_at + 2 :]) == (
+        "-c:v copy -bsf:v mjpeg2jpeg -flush_packets 1 -f mjpeg pipe:1"
+    )
+
+
+def test_an_rtsp_url_is_read_over_tcp(tmp_path: Path) -> None:
+    fake = install(tmp_path, [HANG])
+    with capturing(fake, device="rtsp://host.docker.internal:8554/cam"):
+        argv = wait_for(fake.starts)[0].argv
+    assert "-rtsp_transport tcp -i rtsp://host.docker.internal:8554/cam" in " ".join(argv)
+    assert "v4l2" not in argv
+
+
+def test_with_no_resolution_a_url_is_read_with_no_size_listed(tmp_path: Path) -> None:
+    fake = install(tmp_path, [stream(noise_jpeg())], listed=formats())
+    capture = Capture(CaptureSettings(resolution=None, device="http://cam/s", ffmpeg=fake.path))
+    capture.start()
+    try:
+        wait_for(capture.latest)
+    finally:
+        capture.stop()
+    assert "-video_size" not in fake.starts()[0].argv
+
+
 def segments(jpeg: bytes) -> list[tuple[int, int]]:
     """The marker and offset of each segment up to the scan."""
     found = []
@@ -330,3 +364,56 @@ def test_a_new_size_starts_ffmpeg_again_at_it_and_the_same_size_does_not(tmp_pat
 
     sizes = [start.argv[start.argv.index("-video_size") + 1] for start in fake.starts()]
     assert sizes == ["1920x1080", "3840x2160"]
+
+
+def real_ffmpeg() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("no ffmpeg on PATH. CI installs it")
+    return ffmpeg
+
+
+@contextmanager
+def reading(url: str) -> Iterator[Capture]:
+    """Capture from ``url`` with the real ``ffmpeg``."""
+    capture = Capture(CaptureSettings(resolution=None, device=url, ffmpeg=real_ffmpeg()))
+    capture.start()
+    try:
+        yield capture
+    finally:
+        capture.stop()
+
+
+def png() -> bytes:
+    out = io.BytesIO()
+    Image.effect_noise((WIDTH, HEIGHT), 50).convert("RGB").save(out, "PNG")
+    return out.getvalue()
+
+
+def test_the_real_ffmpeg_reads_mjpeg_over_http_at_the_served_size() -> None:
+    real_ffmpeg()
+    with serving(MjpegServer(noise_jpeg())) as server, reading(server.url) as capture:
+        frame = wait_for(capture.latest)
+    with Image.open(io.BytesIO(frame.jpeg)) as image:
+        assert (image.format, image.size) == ("JPEG", (WIDTH, HEIGHT))
+
+
+def test_the_real_ffmpeg_gives_no_frames_from_a_stream_that_is_not_mjpeg() -> None:
+    real_ffmpeg()
+    with serving(MjpegServer(png(), content_type="image/png")) as server:
+        with reading(server.url) as capture:
+            wait_for(lambda: server.requests >= 3)
+            assert capture.latest() is None
+            assert capture.status().state == "lost"
+
+
+def test_the_real_ffmpeg_gives_frames_again_when_a_stream_comes_back() -> None:
+    real_ffmpeg()
+    with serving(MjpegServer(noise_jpeg())) as server, reading(server.url) as capture:
+        first = wait_for(capture.latest)
+        server.serving.clear()
+        wait_for(lambda: capture.status().state == "lost")
+        server.serving.set()
+        wait_for(lambda: capture.status().state == "ok")
+        frame = capture.latest()
+    assert frame is not None and frame.id > first.id

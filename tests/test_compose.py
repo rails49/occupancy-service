@@ -199,3 +199,20 @@ def test_the_box_env_and_occupancy_env_hold_every_setting(tmp_path: Path) -> Non
     service = json.loads(done.stdout)["services"]["service"]
     assert service["user"] == "1000:1000"
     assert "--camera=/dev/v4l/by-id/usb-camera-video-index0" in service["command"]
+
+
+def test_the_camera_may_be_a_stream_url() -> None:
+    url = "rtsp://host.docker.internal:8554/cam"
+    done = config({**SETTINGS, "OCCUPANCY_CAMERA": url})
+    assert done.returncode == 0, done.stderr
+    assert f"--camera={url}" in json.loads(done.stdout)["services"]["service"]["command"]
+
+
+def test_the_service_reaches_a_stream_on_the_boxs_own_host(project: dict[str, Any]) -> None:
+    assert project["services"]["service"]["extra_hosts"] == ["host.docker.internal=host-gateway"]
+
+
+def test_a_missing_camera_names_both_forms() -> None:
+    done = config({k: v for k, v in SETTINGS.items() if k != "OCCUPANCY_CAMERA"})
+    assert "/dev/v4l/by-id/" in done.stderr
+    assert "stream URL" in done.stderr

@@ -1,4 +1,5 @@
-"""Capture MJPEG from a USB camera through an ``ffmpeg`` child process, keeping the latest frame."""
+"""Capture MJPEG from a V4L2 device or an MJPEG stream through an ``ffmpeg`` child process,
+keeping the latest frame."""
 
 import io
 import logging
@@ -35,9 +36,12 @@ _SIZE = re.compile(r"\b(\d+)x(\d+)\b")
 
 @dataclass(frozen=True)
 class CaptureSettings:
-    """``resolution`` is the open archive's ``camera.resolution``. None, with no archive, is the
+    """``device`` is a V4L2 device path, or the URL of an MJPEG stream when it contains ``://``.
+
+    ``resolution`` is the open archive's ``camera.resolution``. None, with no archive, is the
     largest size the camera lists for MJPEG, asked again at each start of ``ffmpeg``.
-    ``Capture.use`` changes it. The camera is ``lost`` after ``lost_after`` seconds with no new
+    ``Capture.use`` changes it. A stream comes at the size and ``frame_rate`` of its source, so
+    neither applies to it. The camera is ``lost`` after ``lost_after`` seconds with no new
     frame."""
 
     resolution: r49.Resolution | None
@@ -155,25 +159,40 @@ def _listed_size(settings: CaptureSettings) -> tuple[int, int] | None:
     return largest_size(listed.stderr.decode(errors="replace"))
 
 
-def _ffmpeg_command(settings: CaptureSettings, width: int, height: int) -> list[str]:
-    """Copy MJPEG from the camera to stdout, with no decode and no re-encode.
+def is_stream(device: str) -> bool:
+    """Whether ``device`` is the URL of a stream rather than a device path."""
+    return "://" in device
+
+
+def _ffmpeg_command(settings: CaptureSettings, size: tuple[int, int] | None) -> list[str]:
+    """Copy MJPEG from the camera to stdout, with no decode and no re-encode. ``size`` is None
+    for a stream, whose source sets it.
 
     ``mjpeg2jpeg`` adds the Huffman tables, because some UVC cameras leave them out.
     """
-    size = f"{width}x{height}"
+    if size is None:
+        transport = ["-rtsp_transport", "tcp"] if settings.device.startswith("rtsp://") else []
+        source = [*transport, "-i", settings.device]
+    else:
+        # fmt: off
+        source = [
+            "-f", "v4l2", "-input_format", "mjpeg",
+            "-framerate", str(settings.frame_rate), "-video_size", f"{size[0]}x{size[1]}",
+            "-i", settings.device,
+        ]
+        # fmt: on
     # fmt: off
     return [
         settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-f", "v4l2", "-input_format", "mjpeg",
-        "-framerate", str(settings.frame_rate), "-video_size", size,
-        "-i", settings.device,
+        *source,
         "-c:v", "copy", "-bsf:v", "mjpeg2jpeg", "-flush_packets", "1", "-f", "mjpeg", "pipe:1",
     ]
     # fmt: on
 
 
 class Capture:
-    """Runs ``ffmpeg`` on its own thread, and starts it again whenever it ends, until stop().
+    """Reads a V4L2 device or an MJPEG stream. Runs ``ffmpeg`` on its own thread, and starts it
+    again whenever it ends, until stop().
 
     One slot holds the latest frame, so a slow reader only misses frames and never holds up
     capture. status() works from the clock when it is called, so a blocked read of the camera
@@ -232,12 +251,15 @@ class Capture:
             self._stopping.wait(_RETRY_WAIT)
 
     def _run_child(self) -> None:
-        """One ffmpeg, from its start until it ends, hangs or stop() is called. With no resolution
-        set and no size listed, none."""
+        """One ffmpeg, from its start until it ends, hangs or stop() is called. For a device with
+        no resolution set and no size listed, none."""
         with self._lock:
             resolution = self._resolution
             self._new_size.clear()
-        if resolution is None:
+        size: tuple[int, int] | None
+        if is_stream(self._settings.device):
+            size = None
+        elif resolution is None:
             size = _listed_size(self._settings)
             if size is None:
                 return
@@ -245,7 +267,7 @@ class Capture:
             size = (resolution.width, resolution.height)
         try:
             child = subprocess.Popen(
-                _ffmpeg_command(self._settings, *size),
+                _ffmpeg_command(self._settings, size),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
             )
