@@ -19,6 +19,8 @@ uv run python -m occupancy_service --archive <path> --camera /dev/video0 --broke
 
 This starts `Capture`, `L1Loop`, `Publisher` and `LiveServer`, and logs to stderr. With `--detector-model`, `L1Loop` also runs the [detector](#l0). The camera's size is the open archive's `camera.resolution`, and with no archive the largest MJPEG size `ffmpeg -list_formats` gives for the camera. Each archive `L1Loop` opens, after a save too, sets it, and a new size starts `ffmpeg` again.
 
+`--camera` is a V4L2 device path, or the URL of an MJPEG stream: any value with `://` in it. A stream comes at the size and rate its source sets, so neither the archive's size nor `--frame-rate` applies to it. See [A camera that is not a USB webcam](#a-camera-that-is-not-a-usb-webcam).
+
 `--archive` may hold `{railroad}`, as in `--archive=/archives/{railroad}.r49`. Then the service starts with no archive, and opens the loaded railroad's archive once a profile's [railroad topic](#profile-files) names it. A new name, or a new stamp on the same name, opens that railroad's archive for the next frame, as a save does: `events` clients are closed at its first result. A row with `built: false` or an empty name is ignored. A name with a `/` in it has no archive. With no profile naming a railroad topic, `{railroad}` stays unfilled and the service runs with no archive. `occupancy_service.railroad` follows the topic on a connection of its own. A lost broker changes nothing, and the retained row comes again on the next connection.
 
 With no archive at the path, or none yet for the railroad, the service runs, publishes no L1 and no L0, and answers as [LIVE.md](LIVE.md#no-archive) says. A path with no `{railroad}` is the archive whatever railroad is loaded, and the railroad's name is still followed for that answer.
@@ -26,14 +28,14 @@ With no archive at the path, or none yet for the railroad, the service runs, pub
 | Flag | Goes to | Default |
 | :--- | :--- | :--- |
 | `--archive` | `L1Settings.archive`, or with `{railroad}` in it `RailroadSettings.archive` | Required |
-| `--camera` | `CaptureSettings.device` | Required |
+| `--camera` | `CaptureSettings.device`: a device path or an MJPEG stream URL | Required |
 | `--broker <host>:<port>` | `PublisherSettings.host`, `port` | Required |
 | `--profile`, repeated | `PublisherSettings.profiles` | `occupancy` |
 | `--address` | `ServerSettings.address` | `127.0.0.1` |
 | `--port` | `ServerSettings.port` | `8000` |
 | `--engine` | `L1Settings.engine` | `auto` |
 | `--device` | `L1Settings.device` | `auto` |
-| `--frame-rate` | `CaptureSettings.frame_rate` | `20` |
+| `--frame-rate` | `CaptureSettings.frame_rate`, for a device only | `20` |
 | `--detector-model` | `L1Settings.detector_model` | None: no detector |
 | `--detector-engine` | `L1Settings.detector_engine` | `auto` |
 | `--detector-device` | `L1Settings.detector_device` | `auto` |
@@ -366,7 +368,7 @@ scripts/deploy.sh <user>@<box>
 | :--- | :--- | :--- | :--- |
 | `BOX_DOMAIN` | The box name; empty on a box with no certificate | `box.env` | None |
 | `OCCUPANCY_ARCHIVES` | The folder of archives on the box, one `<railroad>.r49` per railroad, mounted read-write at `/archives` | `occupancy.env` | None |
-| `OCCUPANCY_CAMERA` | The camera's path, under `/dev/v4l/by-id/` | `occupancy.env` | None |
+| `OCCUPANCY_CAMERA` | The camera: its path under `/dev/v4l/by-id/`, or an MJPEG stream URL ([below](#a-camera-that-is-not-a-usb-webcam)) | `occupancy.env` | None |
 | `TC49_UID`, `TC49_GID` | The user and group the service runs as, so the files it saves are the person's (`id -u`, `id -g`) | `occupancy.env` | None |
 | `VIDEO_GID`, `RENDER_GID` | The host's `video` and `render` groups, for the camera and the GPU (`getent group video`, `getent group render`) | `occupancy.env` | None |
 | `OCCUPANCY_SERVICE_COMMIT` | The commit the images are named by and carry as `org.opencontainers.image.revision` | `scripts/deploy.sh` | `dev`, and an empty revision |
@@ -396,6 +398,59 @@ Two steps belong to the box and are not code here:
 - On a box with a box name, an `A` record for the `occupancy` label. The door gets a certificate per router, and holds no wildcard.
 - `occupancy` in `BOX_UIS` in `/etc/rails49/box.env`, so the installation's page links the UI.
 
+## A camera that is not a USB webcam
+
+A camera that is not a USB webcam is read as an MJPEG stream, served by a program on the box's host or by the camera itself. `OCCUPANCY_CAMERA` is then the stream's URL, over `rtsp://` or `http://`. `ffmpeg` copies the stream's JPEGs as it copies a webcam's, and reads RTSP over TCP. The service's container reaches the box's own host as `host.docker.internal`.
+
+- Only MJPEG is read. A stream in H.264 or any other codec gives no frames: `ffmpeg` fails and is started again, and every sensor reads `no frames`.
+- Frames are not scaled. The stream's size must be the archive's `camera.resolution`; at any other size each sensor reads `wrong frame size`.
+- A stream that ends or stalls is handled as an unplugged webcam: the camera is `lost`, and `ffmpeg` is started again until the stream is back.
+- The service sets no camera controls. Exposure, white balance and focus are set where the stream is made: in the program that serves it, or in the camera's own settings.
+- A user and password in the URL are passed to `ffmpeg` as given, and show in `ps` and in `ffmpeg`'s error lines.
+- `capture_ms` and a frame's age count from when the frame reached the service. Time in the program that serves the stream, or on the network, is not in them.
+
+### The Raspberry Pi camera with mediamtx
+
+[mediamtx](https://github.com/bluenviron/mediamtx) serves the Pi's ribbon camera over RTSP. Download its `arm64` release onto the Pi, and replace the `paths` section of `mediamtx.yml` with:
+
+```yml
+paths:
+  cam:
+    source: rpiCamera
+    rpiCameraCodec: mjpeg
+    rpiCameraWidth: 1920   # the archive's camera.resolution
+    rpiCameraHeight: 1080
+```
+
+`rpiCameraCodec` must be `mjpeg`: its default, `auto`, picks H.264, which the service does not read. Then, in `/etc/rails49/occupancy.env`:
+
+```sh
+OCCUPANCY_CAMERA=rtsp://host.docker.internal:8554/cam
+```
+
+To keep mediamtx running across a reboot, install it as a systemd service:
+
+```sh
+sudo mkdir -p /usr/local/bin /usr/local/etc/mediamtx
+sudo mv mediamtx /usr/local/bin/
+sudo mv mediamtx.yml /usr/local/etc/mediamtx/
+sudo tee /etc/systemd/system/mediamtx.service >/dev/null <<EOF
+[Unit]
+After=network-online.target
+Wants=network-online.target
+[Service]
+WorkingDirectory=/usr/local/etc/mediamtx
+ExecStart=/usr/local/bin/mediamtx
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now mediamtx
+```
+
+With its default settings, mediamtx serves the stream to anyone on the LAN. Its `authInternalUsers` setting limits who may read it.
+
 ## Test
 
 ```sh
@@ -406,4 +461,4 @@ bin/test.sh             # Ruff, Black, Pyright and pytest
 
 The `images` workflow (`.github/workflows/images.yml`) takes a commit. The installation's release workflow calls it, and it can be run by hand. For each image not yet on GHCR at that commit, it builds the image on an amd64 and an arm64 runner, runs `tests/test_images.py` against it, pushes it by digest, and joins the two under `:<commit>`. An image already there is not built again. It outputs the full commit as `commit` and both digests, as `occupancy-service` and `occupancy-page`. The caller grants `packages: write`. It uploads `compose.yaml` and `deploy/check.r49` as the artifact `occupancy-service-box-files`. The service image installs the Intel compute runtime only on amd64.
 
-The L1 tests use a fake capture source and the packaged model, on the CPU. The detector's tests use a fake detector, and the tests of the command a fake `detector` module on the child's path, so no AGPL package is installed. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. One test runs the real `ffmpeg` command line, and is skipped when `ffmpeg` is not on the `PATH`. The MQTT tests of what goes out on the wire run a real `mosquitto`, which they start themselves on a free port with `rails49-testing`'s `Broker`. They are skipped when it is not installed, except under `CI`, where they fail. The tests of what the publisher decides run on a test connection, with no broker. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.
+The L1 tests use a fake capture source and the packaged model, on the CPU. The detector's tests use a fake detector, and the tests of the command a fake `detector` module on the child's path, so no AGPL package is installed. The drift tests run the [shared cases](LIVE.md#drift-cases), and the real check on the real loop. The server tests run real HTTP and `live-check` against the real loop, on the same fake source. The capture tests use a fake `ffmpeg`, so they need no camera. The tests of the real `ffmpeg` run its command line on a file, and on MJPEG and PNG streams from a local HTTP server, and are skipped when `ffmpeg` is not on the `PATH`. The MQTT tests of what goes out on the wire run a real `mosquitto`, which they start themselves on a free port with `rails49-testing`'s `Broker`. They are skipped when it is not installed, except under `CI`, where they fail. The tests of what the publisher decides run on a test connection, with no broker. CI installs both. The tests of the command run it as a real child process, with the fake `ffmpeg` on the `PATH`.

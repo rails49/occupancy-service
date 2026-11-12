@@ -63,7 +63,11 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="the archive, a folder or a .r49 file. {railroad} in it is the loaded railroad's name",
     )
-    parser.add_argument("--camera", required=True, help="the camera's device, e.g. /dev/video0")
+    parser.add_argument(
+        "--camera",
+        required=True,
+        help="the camera: a device, e.g. /dev/video0, or the URL of an MJPEG stream",
+    )
     parser.add_argument(
         "--broker",
         required=True,
@@ -82,7 +86,11 @@ def _parser() -> argparse.ArgumentParser:
         "--engine", choices=(*get_args(Engine), AUTO), help="what runs the model, or auto"
     )
     parser.add_argument("--device", help="the device the engine runs the model on, or auto")
-    parser.add_argument("--frame-rate", type=float, help="the frames per second to ask the camera")
+    parser.add_argument(
+        "--frame-rate",
+        type=float,
+        help="the frames per second to ask a device. A stream's source sets its own",
+    )
     parser.add_argument(
         "--detector-model",
         type=Path,

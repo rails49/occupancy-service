@@ -33,7 +33,7 @@ services:
           create_host_path: false
     command:
       - --archive=/archives/{railroad}.r49
-      - --camera=${OCCUPANCY_CAMERA:?set the camera's path, under /dev/v4l/by-id/, in /etc/rails49/occupancy.env}
+      - --camera=${OCCUPANCY_CAMERA:?set the camera, a path under /dev/v4l/by-id/ or an MJPEG stream URL, in /etc/rails49/occupancy.env}
       - --broker=broker:1883
       - --profile=occupancy
       - --profile=control
@@ -53,6 +53,9 @@ services:
       - traefik.http.routers.occupancy-live-http.entrypoints=occupancy
       - traefik.http.routers.occupancy-live-http.service=occupancy-live
       - traefik.http.services.occupancy-live.loadbalancer.server.port=8000
+    # A camera served as a stream on the box's own host is at host.docker.internal.
+    extra_hosts:
+      - host.docker.internal:host-gateway
     networks:
       - rails49
 
