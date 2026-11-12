@@ -14,10 +14,10 @@ services:
       args:
         OCCUPANCY_SERVICE_COMMIT: ${OCCUPANCY_SERVICE_COMMIT:-}
     restart: unless-stopped
-    user: "${TC49_UID:?}:${TC49_GID:?}"
+    user: "${TC49_UID:?set it in /etc/rails49/occupancy.env}:${TC49_GID:?set it in /etc/rails49/occupancy.env}"
     group_add:
-      - "${VIDEO_GID:?}"
-      - "${RENDER_GID:?}"
+      - "${VIDEO_GID:?set it in /etc/rails49/occupancy.env}"
+      - "${RENDER_GID:?set it in /etc/rails49/occupancy.env}"
     # 81 is video4linux, 226 is the GPU.
     device_cgroup_rules:
       - "c 81:* rmw"
@@ -27,13 +27,13 @@ services:
         source: /dev
         target: /dev
       - type: bind
-        source: ${OCCUPANCY_ARCHIVE:?the archive's path on the box}
+        source: ${OCCUPANCY_ARCHIVE:?set the archive's path on the box in /etc/rails49/occupancy.env}
         target: /archive.r49
         bind:
           create_host_path: false
     command:
       - --archive=/archive.r49
-      - --camera=${OCCUPANCY_CAMERA:?the camera's path, under /dev/v4l/by-id/}
+      - --camera=${OCCUPANCY_CAMERA:?set the camera's path, under /dev/v4l/by-id/, in /etc/rails49/occupancy.env}
       - --broker=broker:1883
       - --profile=occupancy
       - --profile=control
