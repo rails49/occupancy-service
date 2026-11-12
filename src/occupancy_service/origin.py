@@ -16,7 +16,7 @@ def is_own_page(origin: str | None, host: str | None) -> bool:
     """Whether a request carrying this `Origin` and `Host` is the app's own.
 
     Host against host and not scheme against scheme, because TLS terminates at
-    the door: the browser's origin is `https://control.gleis49.org` and what
+    the door: the browser's origin is `https://control.example.org` and what
     arrives is plain HTTP under that same `Host` (ADR-0042).
 
     A loopback origin is admitted whatever the `Host`, because a page served
