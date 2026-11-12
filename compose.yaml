@@ -1,4 +1,5 @@
-# The occupancy service and the occupancy page, behind the door. The README's
+# The occupancy service and the occupancy page, behind the door, on the UI
+# port. compose.https.yaml adds the routers at the box name. The README's
 # "Box" section gives the settings and the command that starts it.
 
 name: occupancy
@@ -43,12 +44,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=rails49
-      - traefik.http.routers.occupancy-live.rule=Host(`occupancy.${BOX_DOMAIN?start this with --env-file /etc/rails49/box.env}`) && PathPrefix(`/live`)
-      - traefik.http.routers.occupancy-live.entrypoints=websecure
-      - traefik.http.routers.occupancy-live.tls.certresolver=le
-      # /live over plain HTTP on the UI port, at any host. On a box with no
-      # certificate the router above names an entry point that does not exist;
-      # the door drops it and serves this one.
+      # /live over plain HTTP on the UI port, at any host.
       - traefik.http.routers.occupancy-live-http.rule=PathPrefix(`/live`)
       - traefik.http.routers.occupancy-live-http.entrypoints=occupancy
       - traefik.http.routers.occupancy-live-http.service=occupancy-live
@@ -72,9 +68,6 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=rails49
-      - traefik.http.routers.occupancy.rule=Host(`occupancy.${BOX_DOMAIN?start this with --env-file /etc/rails49/box.env}`)
-      - traefik.http.routers.occupancy.entrypoints=websecure
-      - traefik.http.routers.occupancy.tls.certresolver=le
       # The page over plain HTTP on the UI port, at any host, as for /live.
       - traefik.http.routers.occupancy-http.rule=PathPrefix(`/`)
       - traefik.http.routers.occupancy-http.entrypoints=occupancy

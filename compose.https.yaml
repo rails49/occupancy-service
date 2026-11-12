@@ -1,0 +1,16 @@
+# The routers at the box name, over HTTPS with the door's certificate. A box
+# with a box name loads this beside compose.yaml; a box with none does not, as
+# its door has neither the `websecure` entry point nor the `le` resolver.
+
+services:
+  service:
+    labels:
+      - traefik.http.routers.occupancy-live.rule=Host(`occupancy.${BOX_DOMAIN?start this with --env-file /etc/rails49/box.env}`) && PathPrefix(`/live`)
+      - traefik.http.routers.occupancy-live.entrypoints=websecure
+      - traefik.http.routers.occupancy-live.tls.certresolver=le
+
+  page:
+    labels:
+      - traefik.http.routers.occupancy.rule=Host(`occupancy.${BOX_DOMAIN?start this with --env-file /etc/rails49/box.env}`)
+      - traefik.http.routers.occupancy.entrypoints=websecure
+      - traefik.http.routers.occupancy.tls.certresolver=le

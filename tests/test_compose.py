@@ -1,5 +1,5 @@
-"""The compose project a box runs, as `docker compose config` resolves it. This needs the docker
-CLI and no daemon."""
+"""The compose project a box runs, as `docker compose config` resolves it: `compose.yaml`, and
+`compose.https.yaml` beside it on a box with a box name. This needs the docker CLI and no daemon."""
 
 import json
 import os
@@ -24,13 +24,18 @@ OCCUPANCY_ENV = {
 
 SETTINGS = BOX_ENV | OCCUPANCY_ENV
 
+HTTPS = ["compose.yaml", "compose.https.yaml"]
+
 
 def config(
-    settings: dict[str, str], env_files: list[Path] | None = None
+    settings: dict[str, str],
+    env_files: list[Path] | None = None,
+    files: list[str] = HTTPS,
 ) -> subprocess.CompletedProcess[str]:
     flags = [arg for path in env_files or [] for arg in ("--env-file", str(path))]
+    flags += [arg for file in files for arg in ("-f", file)]
     return subprocess.run(
-        ["docker", "compose", *flags, "-f", "compose.yaml", "config", "--format", "json"],
+        ["docker", "compose", *flags, "config", "--format", "json"],
         cwd=ROOT,
         env={**{k: v for k, v in os.environ.items() if k not in SETTINGS}, **settings},
         capture_output=True,
@@ -103,6 +108,15 @@ def test_the_websecure_routers_keep_their_certificate(project: dict[str, Any]) -
 def test_box_domain_may_be_empty() -> None:
     done = config({**SETTINGS, "BOX_DOMAIN": ""})
     assert done.returncode == 0, done.stderr
+
+
+def test_with_no_box_name_no_router_names_websecure_or_a_resolver() -> None:
+    done = config(OCCUPANCY_ENV, files=["compose.yaml"])
+    assert done.returncode == 0, done.stderr
+    for service in json.loads(done.stdout)["services"].values():
+        assert not [
+            k for k, v in service["labels"].items() if "websecure" in v or "certresolver" in k
+        ]
 
 
 def test_a_replugged_camera_appears_with_no_restart(project: dict[str, Any]) -> None:

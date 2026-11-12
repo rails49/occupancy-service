@@ -9,7 +9,7 @@
 # with no /etc/rails49/occupancy.env, brings the clone to the head of the
 # branch, main by default, refuses a clone that is not clean, and builds and
 # starts both images under the commit, with the settings in box.env and
-# occupancy.env.
+# occupancy.env and the routers in compose.https.yaml.
 set -euo pipefail
 
 box=${1:?usage: scripts/deploy.sh <user>@<box> [<branch>]}
@@ -47,6 +47,6 @@ OCCUPANCY_SERVICE_COMMIT=$(git rev-parse HEAD)
 export OCCUPANCY_SERVICE_COMMIT
 
 docker compose --env-file /etc/rails49/box.env --env-file /etc/rails49/occupancy.env \
-  -f compose.yaml up -d --build
+  -f compose.yaml -f compose.https.yaml up -d --build
 echo "deployed occupancy-service:$OCCUPANCY_SERVICE_COMMIT"
 REMOTE
