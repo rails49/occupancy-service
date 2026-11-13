@@ -63,7 +63,7 @@ services:
       args:
         OCCUPANCY_SERVICE_COMMIT: ${OCCUPANCY_SERVICE_COMMIT:-}
         # The rails49/occupancy commit the page is built from.
-        OCCUPANCY_COMMIT: adb585ac3d4a6a1b3ecdee6c323491ecadf8e0b6
+        OCCUPANCY_COMMIT: 108a28a1c06113c5e9654969fbdf897da52b4475
     restart: unless-stopped
     labels:
       - traefik.enable=true
