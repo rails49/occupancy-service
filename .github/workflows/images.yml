@@ -129,6 +129,10 @@ jobs:
           build-args: ${{ steps.args.outputs.args }}
           load: true
           tags: occupancy-${{ matrix.role }}:ci
+          # Layers that did not change since the last build are taken from GHCR,
+          # so a box pulls only the ones that did (rails49/.github#80).
+          cache-from: type=registry,ref=ghcr.io/rails49/occupancy-${{ matrix.role }}:buildcache-${{ runner.arch }}
+          cache-to: type=registry,ref=ghcr.io/rails49/occupancy-${{ matrix.role }}:buildcache-${{ runner.arch }},mode=max
 
       - run: |
           export "OCCUPANCY_${ROLE^^}_IMAGE=occupancy-$ROLE:ci" OCCUPANCY_SERVICE_COMMIT="$COMMIT"
