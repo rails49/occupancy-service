@@ -26,11 +26,11 @@ CHECK_ARCHIVE = ROOT / "deploy" / "check.r49"
 CHECK_WAIT = 60  # Seconds the release check waits before it looks: rails49/.github#71 decision 12.
 
 
-def pinned_detector() -> str:
-    """The rails49-detector version the service's Dockerfile pins."""
+def pinned(arg: str) -> str:
+    """The version the service's Dockerfile pins in ``arg``."""
     text = (ROOT / "deploy" / "service.Dockerfile").read_text()
-    found = re.search(r"^ARG DETECTOR_VERSION=(\S+)$", text, re.MULTILINE)
-    assert found, "service.Dockerfile pins no detector"
+    found = re.search(rf"^ARG {arg}=(\S+)$", text, re.MULTILINE)
+    assert found, f"service.Dockerfile pins no {arg}"
     return found.group(1)
 
 
@@ -64,7 +64,7 @@ def test_the_service_image_holds_the_pinned_detector() -> None:
     assert SERVICE is not None
     script = "import detector, importlib.metadata as m; print(m.version('rails49-detector'))"
     found = run("run", "--rm", "--entrypoint", "python", SERVICE, "-c", script).strip()
-    assert found == pinned_detector()
+    assert found == pinned("DETECTOR_VERSION")
 
 
 @pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
@@ -74,7 +74,68 @@ def test_the_service_image_carries_the_detectors_license_and_source() -> None:
     text = run("run", "--rm", "--entrypoint", "cat", SERVICE, f"{doc}/LICENSE")
     assert text.split()[:4] == ["GNU", "AFFERO", "GENERAL", "PUBLIC"]
     source = run("run", "--rm", "--entrypoint", "cat", SERVICE, f"{doc}/SOURCE").strip()
-    assert source == f"https://github.com/rails49/detector/tree/v{pinned_detector()}"
+    assert source == f"https://github.com/rails49/detector/tree/v{pinned('DETECTOR_VERSION')}"
+
+
+@pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
+def test_the_service_image_carries_ffmpegs_license_and_source() -> None:
+    assert SERVICE is not None
+    doc = "/usr/share/doc/ffmpeg"
+    text = run("run", "--rm", "--entrypoint", "cat", SERVICE, f"{doc}/COPYING.LGPLv2.1")
+    assert text.split()[:3] == ["GNU", "LESSER", "GENERAL"]
+    source = run("run", "--rm", "--entrypoint", "cat", SERVICE, f"{doc}/SOURCE").strip()
+    assert source == f"https://ffmpeg.org/releases/ffmpeg-{pinned('FFMPEG_VERSION')}.tar.xz"
+
+
+@pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
+@pytest.mark.parametrize(
+    "part",
+    [
+        "demuxer=v4l2",
+        "demuxer=mpjpeg",
+        "demuxer=rtsp",
+        "decoder=mjpeg",
+        "bsf=mjpeg2jpeg",
+        "muxer=mjpeg",
+    ],
+)
+def test_the_service_images_ffmpeg_has_each_part_capture_runs(part: str) -> None:
+    assert SERVICE is not None
+    command = ["docker", "run", "--rm", "--entrypoint", "ffmpeg", SERVICE, "-hide_banner"]
+    found = subprocess.run([*command, "-h", part], capture_output=True, text=True, check=True)
+    assert "Unknown" not in found.stdout + found.stderr, found.stdout + found.stderr
+
+
+# Capture with the image's ffmpeg, from the tests' MJPEG server, both inside the container.
+READ_A_STREAM = """
+import io, sys, time
+from PIL import Image
+sys.path.insert(0, "/tests")
+from mjpeg_server import MjpegServer, serving
+from occupancy_service.capture import Capture, CaptureSettings
+jpeg = io.BytesIO()
+Image.effect_noise((64, 48), 50).convert("RGB").save(jpeg, "JPEG")
+with serving(MjpegServer(jpeg.getvalue())) as server:
+    capture = Capture(CaptureSettings(resolution=None, device=server.url))
+    capture.start()
+    for _ in range(100):
+        if capture.latest() is not None:
+            break
+        time.sleep(0.1)
+    capture.stop()
+frame = capture.latest()
+print(None if frame is None else Image.open(io.BytesIO(frame.jpeg)).size)
+"""
+
+
+@pytest.mark.skipif(SERVICE is None, reason="OCCUPANCY_SERVICE_IMAGE names no image")
+def test_the_service_image_reads_an_mjpeg_stream() -> None:
+    assert SERVICE is not None
+    mount = f"type=bind,source={ROOT / 'tests'},target=/tests,readonly"
+    found = run(
+        "run", "--rm", "--mount", mount, "--entrypoint", "python", SERVICE, "-c", READ_A_STREAM
+    )
+    assert found.strip() == "(64, 48)"
 
 
 @pytest.mark.skipif(COMMIT is None, reason="OCCUPANCY_SERVICE_COMMIT names no commit")
