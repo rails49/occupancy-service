@@ -5,15 +5,44 @@
 # with its license text and source URL in /usr/share/doc/rails49-detector.
 # Set empty, the image holds no detector code.
 
+FROM ghcr.io/astral-sh/uv:0.12.6 AS uv
+
+# ffmpeg with only what capture.py runs: MJPEG from a V4L2 device, or over HTTP
+# or RTSP, copied to MJPEG on stdout. It is LGPL, with its license text and
+# source URL in /usr/share/doc/ffmpeg.
+FROM ubuntu:24.04 AS ffmpeg
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl gcc libc6-dev make xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG FFMPEG_VERSION=9.0.2
+ARG FFMPEG_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+WORKDIR /src
+RUN curl -fsSLo ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" \
+    && echo "$FFMPEG_SHA256  ffmpeg.tar.xz" | sha256sum -c - \
+    && tar -xJf ffmpeg.tar.xz --strip-components=1 \
+    && ./configure --disable-everything --disable-autodetect --disable-doc \
+    --disable-ffplay --disable-ffprobe --disable-x86asm \
+    --enable-indev=v4l2 --enable-demuxer=mjpeg,mpjpeg,rtsp \
+    --enable-protocol=http,pipe,tcp --enable-decoder=mjpeg \
+    --enable-parser=mjpeg --enable-bsf=mjpeg2jpeg --enable-muxer=mjpeg \
+    && make -j"$(nproc)" ffmpeg \
+    && mkdir -p /out/usr/local/bin /out/usr/share/doc/ffmpeg \
+    && install -s ffmpeg /out/usr/local/bin/ \
+    && cp COPYING.LGPLv2.1 LICENSE.md /out/usr/share/doc/ffmpeg/ \
+    && echo "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" \
+    > /out/usr/share/doc/ffmpeg/SOURCE
+
 FROM ubuntu:24.04
 
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates ffmpeg \
+    ca-certificates \
     $(if [ "$TARGETARCH" = amd64 ]; then echo intel-opencl-icd ocl-icd-libopencl1; fi) \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.12.6 /uv /usr/local/bin/uv
+COPY --from=ffmpeg /out /
 
 ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
@@ -22,14 +51,21 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
 
 WORKDIR /app
 
+# uv and its cache are mounted for each step, and stay out of the image.
 COPY pyproject.toml uv.lock .python-version README.md ./
-RUN uv sync --locked --no-dev --extra openvino --no-install-project
+RUN --mount=from=uv,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --extra openvino --no-install-project
 
 COPY src ./src
-RUN uv sync --locked --no-dev --extra openvino --no-editable
+RUN --mount=from=uv,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --extra openvino --no-editable
 
 ARG DETECTOR_VERSION=0.0.2
-RUN if [ -n "$DETECTOR_VERSION" ]; then \
+RUN --mount=from=uv,source=/uv,target=/usr/local/bin/uv \
+    --mount=type=cache,target=/root/.cache/uv \
+    if [ -n "$DETECTOR_VERSION" ]; then \
     uv pip install --python /opt/venv/bin/python "rails49-detector==$DETECTOR_VERSION" \
     && mkdir -p /usr/share/doc/rails49-detector \
     && cp /opt/venv/lib/python*/site-packages/rails49_detector-*.dist-info/licenses/LICENSE \
