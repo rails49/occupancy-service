@@ -252,7 +252,10 @@ def every_optional_field() -> dict[str, Any]:
                     "message": {"state": "occupied", "confidence": 0.93},
                     "time": "2026-11-05T10:15:30.125Z",
                 },
-                "text-profile": {"message": "ON", "time": "2026-11-05T10:15:30.125+00:00"},
+                "control": {
+                    "message": {"addr": "C3.A", "occupancy": "occupied"},
+                    "time": "2026-11-05T10:15:30.125+00:00",
+                },
             },
         },
     }
@@ -358,6 +361,7 @@ def test_accepts_the_json_only_answer_with_optional_fields() -> None:
         ("last_messages", {"C3.A": {"p": {"message": "ON"}}}),
         ("last_messages", {"C3.A": {"p": {"message": "ON", "time": "soon"}}}),
         ("last_messages", {"C3.A": {"p": {"message": 1, "time": "2026-11-05T10:15:30Z"}}}),
+        ("last_messages", {"C3.A": {"p": {"message": "ON", "time": "2026-11-05T10:15:30Z"}}}),
     ],
 )
 def test_refuses_a_malformed_optional_field(field: str, value: Any) -> None:

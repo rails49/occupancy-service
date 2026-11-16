@@ -497,7 +497,7 @@ def _is_classifier(value: Any) -> bool:
 def _is_last_message(value: Any) -> bool:
     return (
         isinstance(value, dict)
-        and isinstance(value.get("message"), str | dict)
+        and isinstance(value.get("message"), dict)
         and _is_time(value.get("time"))
     )
 

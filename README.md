@@ -173,32 +173,30 @@ A client that closes or resets a connection ends that connection's thread, and n
 
 `occupancy_service.publisher` publishes L1 as its active profiles say, over `paho-mqtt`, on one connection that every profile shares. `PublisherSettings` holds the broker's host and port, with no authentication, and the active profiles, which default to the own-vocabulary profile only. It also holds how often to retry a lost broker (1 s), the MQTT keepalive (5 s), and the timeout of connecting (2 s). The connection has no last will: [When the service dies or hangs](#when-the-service-dies-or-hangs) says what each controller sees. The [command](#run) passes `publisher.last_messages` to `LiveServer`, so `latest` reports them. What each active profile sends, holds and last sent is an `ActiveProfile`, in `occupancy_service.active_profile`; `Publisher` keeps the thread and the connection, and hands each pass to a `Sender`, which sends L0 and runs each `ActiveProfile`.
 
-Every sensor goes out on each connect and on each repeat, and each [L1 change](GLOSSARY.md#l1-change) goes out at once, except a `clear` that a profile [holds](#holding-clear). What goes out for an L1 change is that sensor's entry in the newest result, so an L1 change a later one has already replaced never goes out, and a sensor with more than one L1 change before the publisher looks sends that entry once. A profile with `repeat = 0` does not repeat, and sends an L1 change or a clean stop's `unknown` only if its payload differs from the last one sent for that sensor. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. It says nothing more, and neither does a topic that a new archive `id` moves, so on a retained profile the broker keeps the last message on that topic. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart. Nothing goes out while a connection is down, and a message at `qos` 1 or 2 the broker had not acknowledged when it was lost is dropped, so the new connection sends only what is current.
+Every sensor goes out on each connect and on each repeat, and each [L1 change](GLOSSARY.md#l1-change) goes out at once, except a `clear` that a profile [holds](#holding-clear). What goes out for an L1 change is that sensor's entry in the newest result, so an L1 change a later one has already replaced never goes out, and a sensor with more than one L1 change before the publisher looks sends that entry once. Sensors and the archive's `id` come from the newest result each time, so a reload needs no restart, and a sensor the manifest no longer names stops being reported. It says nothing more, and neither does a topic that a new archive `id` moves. Until the first result every sensor is `unknown`, as [L1](#l1) says, and a repeat is never older than `scoring stalled` allows. A clean stop publishes `unknown` with the reason `service stopped` for every sensor, then disconnects. A lost broker is retried with no restart. Nothing goes out while a connection is down, and every message goes out unretained at QoS 0, so the new connection sends only what is current.
 
 An error in the publisher's own loop, such as a connection that cannot be made, is logged once. Then the connection disconnects cleanly, and nothing more is published. The process goes on, with `latest` and `events`, and a restart publishes again.
 
 ### Profile files
 
-A profile is a TOML file. The `profiles` setting names each by a shipped profile's name, or by a path holding a `/` or ending in `.toml`. A profile is called by its file's name, and two active ones cannot share a name. A file with anything wrong or unknown in it stops the `Publisher` being made.
+A profile is a TOML file the service ships. `--profile` takes a shipped profile's name, and refuses anything else. `PublisherSettings.profiles` also takes a path holding a `/` or ending in `.toml`. A profile is called by its file's name, and two active ones cannot share a name. A file with anything wrong or unknown in it stops the `Publisher` being made.
 
 | Key | Holds |
 | :--- | :--- |
 | `topic` | The topic template. It may hold `{sensor}` and `{archive_id}`. |
-| `payload.occupied`, `payload.clear`, `payload.unknown` | What to send. A table is sent as JSON, and a string as text. Each may hold `{sensor}`, `occupied` also `{confidence}`, and `unknown` also `{reason}`. |
-| `retain` | `true` or `false`. |
-| `qos` | 0, 1 or 2. |
-| `repeat` | Seconds between sending every sensor, from 0. 0 means no repeat: every sensor still goes out on each connect, and anything else only if its payload differs from the last one sent for that sensor. |
+| `payload.occupied`, `payload.clear`, `payload.unknown` | What to send: a table, sent as JSON. Each may hold `{sensor}`, `occupied` also `{confidence}`, and `unknown` also `{reason}`. |
+| `repeat` | Seconds between sending every sensor, above 0. |
 | `clear_hold_s` | Optional. Seconds to [hold](#holding-clear) a `clear`, from 0. Absent or 0 means no hold. |
 | `l0_topic` | Optional. The topic of [L0](#l0), which may hold `{archive_id}`. Absent means no L0. |
 | `railroad_topic`, `railroad_field`, `railroad_stamp` | Optional, all three or none. A topic whose JSON object names the loaded railroad, which fills `{railroad}` in `--archive`, and the fields of its name and of its build's stamp. |
 
 In a table, a string that is only `{confidence}` becomes a JSON number. Anywhere else a placeholder becomes text.
 
-A placeholder is a name of letters, digits and `_` between braces. Braces around a name with a space or a hyphen, such as `{ sensor }` or `{archive-id}`, would go out as text, so a profile holding them in a topic, a payload or a table's key is refused. A table's key cannot hold a placeholder either, since a key is not filled. Other braces are text, so a string payload may be JSON text such as `'{"state": "on"}'`.
+A placeholder is a name of letters, digits and `_` between braces. Braces around a name with a space or a hyphen, such as `{ sensor }` or `{archive-id}`, would go out as text, so a profile holding them in a topic, a payload or a table's key is refused. A table's key cannot hold a placeholder either, since a key is not filled.
 
 A `topic` or `l0_topic` that starts with `$`, which a broker keeps for its own topics, is refused, and so is one whose text without its placeholders is over 65535 bytes in UTF-8, the most MQTT allows.
 
-A profile with an `l0_topic` publishes one message per detector run there, never retained, at the profile's `qos`. The message is the [`l0` object of `latest`](LIVE.md#l0) without its `frame_id`, which only `latest` can give. L0 does not repeat, and does not go out on a connect.
+A profile with an `l0_topic` publishes one message per detector run there, never retained, at QoS 0. The message is the [`l0` object of `latest`](LIVE.md#l0) without its `frame_id`, which only `latest` can give. L0 does not repeat, and does not go out on a connect.
 
 A sensor id or archive `id` that a topic holding it cannot carry, because it has `+`, `#`, `/`, a control character or a Unicode non-character, or makes a topic MQTT does not allow, is logged once, and again if a reload removes the sensor and adds it back, and that sensor is not published on that profile. The other sensors and profiles keep reporting.
 
@@ -207,8 +205,7 @@ A sensor id or archive `id` that a topic holding it cannot carry, because it has
 The connection has no last will. MQTT allows one will per connection, so a will on each sensor's topic would need a connection per sensor, and a will never covered a hung service whose connection stays up. A service that is killed, whose host or network fails, that hangs, or whose publisher fails, stops sending, and the broker sends nothing for it. What each controller sees then:
 
 - `control`: its timer per sensor reads `unknown` after 3 s with no report.
-- [JMRI](#jmri) keeps the last state. A JMRI-side script can do what `control` does: listen on the sensor topics itself, and set a sensor `ACTIVE` after 3 s with no message. It has to read the MQTT messages, as a repeat of the same payload changes no JMRI sensor's state. The `jmri` profile repeats every second, which such a script relies on. This repository does not ship one.
-- [Rocrail](#rocrail) keeps the last state. Its profile does not repeat, so a timer on that side cannot work.
+- A program reading the [`occupancy` profile](#other-programs) can do what `control` does: take a sensor as `unknown` after 3 s with no message.
 
 ### Holding `clear`
 
@@ -232,8 +229,6 @@ The hold makes `clear` later, so control releases a block or transit up to that 
 
 ```toml
 topic = "occupancy/{archive_id}/sensor/{sensor}"
-retain = false
-qos = 0
 repeat = 1
 l0_topic = "occupancy/{archive_id}/l0"
 
@@ -253,8 +248,6 @@ reason = "{reason}"
 
 ```toml
 topic = "tc49/layout/sensor"
-retain = false
-qos = 0
 repeat = 0.9
 clear_hold_s = 1
 railroad_topic = "tc49/layout/state/railroad"
@@ -275,62 +268,15 @@ occupancy = "unknown"
 reason = "{reason}"
 ```
 
-`jmri`, for JMRI's MQTT sensors. It is not active by default:
+### Other programs
 
-```toml
-topic = "track/sensor/{sensor}"
-retain = true
-qos = 0
-repeat = 1
+A program other than control reads the `occupancy` profile: subscribe to `occupancy/+/sensor/+`, and each message is an [L1 entry](LIVE.md#l1-entry) for the sensor at the end of the topic, repeated every second. To see them:
 
-[payload]
-occupied = "ACTIVE"
-clear = "INACTIVE"
-unknown = "ACTIVE"
+```sh
+mosquitto_sub -h box -v -t 'occupancy/+/sensor/+'
 ```
 
-A string payload is written the same way, as `clear = "OFF {sensor}"` under `[payload]`.
-
-### JMRI
-
-Turn it on with `--profile jmri`, or with `--profile occupancy --profile jmri` to keep the own vocabulary too. In JMRI, add an MQTT connection to the same broker, and add a sensor for each sensor in the archive. A sensor's `id` must be JMRI's name after `MS`, so `C3.A` is the sensor `MSC3.A`. JMRI's MQTT channel is blank by default since JMRI 5.1.2. If one is set, copy the profile to a file that puts the channel before `track/sensor/{sensor}`, and use that file.
-
-- `occupied` is `ACTIVE` and `clear` is `INACTIVE`. `unknown` is `ACTIVE` too: JMRI's `MqttSensor` takes only `ACTIVE` and `INACTIVE`, and for anything else logs a warning and keeps the state it had. A sensor JMRI cannot see is taken as occupied.
-- Each message is retained, so JMRI gets every sensor's state when it connects.
-- A person who clicks a sensor in JMRI publishes retained on the same topic. The repeat puts the service's state back within about 1 s.
-- A clean stop leaves every sensor `ACTIVE`, retained. A sensor a reload removes keeps the last state the broker retained for it.
-
-JMRI does not notice a dead or hung service: its sensors keep the last state the service sent, unless a script on the JMRI side [times them out](#when-the-service-dies-or-hangs).
-
-`rocrail`, for Rocrail's sensors. It is not active by default:
-
-```toml
-topic = "rocrail/service/field"
-retain = false
-qos = 1
-repeat = 0
-
-[payload]
-occupied = '<fb id="{sensor}" state="true"/>'
-clear = '<fb id="{sensor}" state="false"/>'
-unknown = '<fb id="{sensor}" state="true"/>'
-```
-
-### Rocrail
-
-Turn it on with `--profile rocrail`, or with `--profile occupancy --profile rocrail` to keep the own vocabulary too. In Rocrail, set the MQTT broker's host and port to the service's broker, as the [wiki's services page](https://wiki.rocrail.net/doku.php?id=rocrailini-service-en) says. A sensor's `id` must be Rocrail's sensor ID, and should avoid `"`, `<` and `&`: the service does not escape it, and Rocrail drops a message it cannot parse. `rocrail/service/field` needs no support key and no address or interface on the sensor. This was checked on Rocrail 26.05.15.
-
-- `occupied` is `true` and `clear` is `false`. `unknown` is `true` too, as Rocrail has only the two: a sensor the service cannot see is taken as occupied.
-- Nothing is retained and nothing repeats, because Rocrail takes a repeated `true` as a new event. A change goes out only when it turns `true` into `false` or back, so `occupied` to `unknown`, or a new reason, sends nothing.
-- A clean stop turns every sensor `true`.
-- A sensor the manifest removes is sent nothing more, and keeps its last state in Rocrail.
-
-In automatic mode, `unknown`, or a false detection, on a block with no train is a ghost train, and by default Rocrail then turns off track power until a person turns it on. That includes a block just released while its sensor stays `true`, as a train's tail leaves it. With `poweroffatghost="false"` on `ctrl` in `rocrail.ini`, a ghost closes only that block, and a running train continues. Outside automatic mode no ghost is reported.
-
-- Start the service before turning on automatic mode, so every sensor has its state first.
-- Restart the service after restarting Rocrail. With no repeat and no retain, Rocrail keeps the states it had until the next change. This is expected, and not yet tested.
-
-Rocrail does not notice a [dead or hung service](#when-the-service-dies-or-hangs), nor a lost broker: its sensors keep the last state the service sent.
+The service ships nothing for JMRI, Rocrail or any other program. A program with only two sensor states needs a bridge that subscribes to these messages, decides what `unknown` means, and publishes what that program reads.
 
 ## Box
 

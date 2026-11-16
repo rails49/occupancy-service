@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -348,6 +349,16 @@ def test_an_unknown_profile_refuses_the_process_with_no_port_left_bound(
         probe.bind(("127.0.0.1", port))
 
 
+@pytest.mark.parametrize("name", ["jmri", "rocrail", "file"])
+def test_a_profile_that_is_not_shipped_refuses_the_process(
+    tmp_path: Path, archive: Path, name: str
+) -> None:
+    if name == "file":
+        shipped = Path(__file__).parent.parent / "src/occupancy_service/profiles/occupancy.toml"
+        name = str(shutil.copy(shipped, tmp_path / "mine.toml"))
+    assert name in assert_refused(tmp_path, archive, "--profile", name)
+
+
 def test_a_refusal_comes_before_anything_the_model_writes(tmp_path: Path, archive: Path) -> None:
     line = assert_refused(tmp_path, archive, "--device", "NPU", "--profile", "nonsense")
     assert "nonsense" in line
@@ -492,33 +503,23 @@ def killed(service: Service, camera: FakeFfmpeg) -> float:
     return died_at
 
 
-def test_sigkill_sends_nothing_more_on_any_profile_and_jmri_keeps_its_retained_state(
+def test_sigkill_sends_nothing_more_on_any_profile(
     tmp_path: Path, camera: FakeFfmpeg, archive: Path, broker: Broker
 ) -> None:
     """The service has no last will: a controller sees the messages stop, and nothing else."""
     broker.start()
-    subscriber = Subscriber(broker.port, qos=1)
-    jmri = [f"track/sensor/{id}" for id in SENSORS]
-    profiles = ("--profile", "occupancy", "--profile", "jmri", "--profile", "rocrail")
+    subscriber = Subscriber(broker.port)
+    profiles = ("--profile", "occupancy", "--profile", "control")
     try:
         with started(tmp_path, camera, archive, broker.port, *profiles) as service:
-            wait_for(lambda: all(subscriber.on(topic) for topic in jmri), 10)
-            wait_for(lambda: subscriber.on("rocrail/service/field") and subscriber.on(f"{OWN}s1"))
+            wait_for(lambda: subscriber.on("tc49/layout/sensor") and subscriber.on(f"{OWN}s1"))
             died_at = killed(service, camera)
         dropped = r"Client occupancy-service-\S+ (closed its connection|has exceeded timeout)"
         wait_for(lambda: re.search(dropped, broker.log.read_text(errors="replace")), 15)
         time.sleep(0.5)
         assert [m for m in subscriber.messages if m.at > died_at] == []
-        last = {topic: subscriber.on(topic)[-1].payload for topic in jmri}
     finally:
         subscriber.close()
-    late = Subscriber(broker.port)
-    try:
-        for topic in jmri:
-            kept = late.wait_for(lambda m, t=topic: m.topic == t)
-            assert (kept.payload, kept.retain) == (last[topic], True)
-    finally:
-        late.close()
 
 
 def test_scoring_pauses_while_the_power_topic_reads_off(

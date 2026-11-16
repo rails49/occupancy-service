@@ -8,8 +8,6 @@ from dataclasses import dataclass
 class Published:
     topic: str
     body: bytes
-    qos: int
-    retain: bool
 
 
 class FakeConnection:
@@ -38,10 +36,10 @@ class FakeConnection:
         with self._lock:
             return [message for message in self.published if message.topic == topic]
 
-    def publish(self, topic: str, body: bytes, qos: int, retain: bool) -> bool:
+    def publish(self, topic: str, body: bytes) -> bool:
         with self._lock:
             if self._connected:
-                self.published.append(Published(topic, body, qos, retain))
+                self.published.append(Published(topic, body))
             return self._connected
 
     def take_fresh(self) -> bool:

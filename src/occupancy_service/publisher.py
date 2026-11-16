@@ -55,8 +55,8 @@ class Connection(Protocol):
     """One connection to the broker, which keeps itself up and reconnects. Its client id and log
     label are fixed when it is made."""
 
-    def publish(self, topic: str, body: bytes, qos: int, retain: bool) -> bool:
-        """False when it is down or the message is refused."""
+    def publish(self, topic: str, body: bytes) -> bool:
+        """Sends unretained at qos 0. False when it is down or the message is refused."""
         ...
 
     def take_fresh(self) -> bool:
@@ -81,9 +81,8 @@ Connect = Callable[[str, str], Connection]
 
 
 class _Connection:
-    """One paho client, which paho's thread keeps up and reconnects. Each new connection drops
-    what paho still holds from the one before, then is fresh, for the publisher's thread to take
-    and send what this connection carries."""
+    """One paho client, which paho's thread keeps up and reconnects. Each new connection is fresh,
+    for the publisher's thread to take and send what this connection carries."""
 
     def __init__(self, settings: PublisherSettings, client_id: str, label: str) -> None:
         self.label = label
@@ -104,12 +103,10 @@ class _Connection:
         # paho 2.2 has no public handle on its thread: ``_thread`` is it, until it ends.
         self._thread: threading.Thread | None = client._thread
 
-    def publish(self, topic: str, body: bytes, qos: int, retain: bool) -> bool:
-        """What paho holds unacknowledged when the connection ends, the next one drops: it would
-        go out stale after the reconnect."""
+    def publish(self, topic: str, body: bytes) -> bool:
         if not self._client.is_connected():
             return False
-        sent = self._client.publish(topic, body, qos, retain)
+        sent = self._client.publish(topic, body, qos=0, retain=False)
         return sent.rc == MQTTErrorCode.MQTT_ERR_SUCCESS
 
     def take_fresh(self) -> bool:
@@ -149,9 +146,6 @@ class _Connection:
         settings = self._settings
         _log.info("connected %s to the broker at %s:%s", self.label, settings.host, settings.port)
         self._log_connect_failure = True
-        # A QoS 1 or 2 message the broker never acknowledged, which paho would send again after
-        # this callback returns. It is stale by now: being fresh sends what is current instead.
-        client.drop_out_messages()
         self._fresh.set()
 
     def _on_connect_fail(self, client: paho.Client, userdata: Any) -> None:
@@ -238,13 +232,13 @@ class Sender:
         for profile in self._l0_profiles:
             topic = profile.l0_topic_for(result.archive_id)
             if topic is not None:
-                connection.publish(topic, body, profile.qos, retain=False)
+                connection.publish(topic, body)
 
-    def _send(self, topic: str, body: bytes, qos: int, retain: bool) -> bool:
+    def _send(self, topic: str, body: bytes) -> bool:
         """The ``send`` of every ``ActiveProfile``: only while the connection is up. When it is
         not, the next connection sends what it carries."""
         connection = self._connection
-        return connection is not None and connection.publish(topic, body, qos, retain)
+        return connection is not None and connection.publish(topic, body)
 
 
 class Publisher:

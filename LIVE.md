@@ -84,7 +84,7 @@ Everything except `l0`, `detector`, `classifier`, `drift`, `last_messages` and t
 | `timings` | object | Any of `capture_ms`, `decode_ms`, `cut_ms`, `classify_ms`, `rate_fps`, `detect_ms`, `l0_rate_fps` and `l0_age_ms`, each a number from 0. The last three are the detector's: its newest run, its rate of runs, and the age of its newest L0, however old. |
 | `camera` | object | Any of `state` (`ok` or `lost`), `rate_fps` and `frame_age_ms`, the last two numbers from 0. |
 | `drift` | object | How far the camera has moved, from its own sampled frame. See [Drift](#drift). |
-| `last_messages` | object | Sensor id to profile name to `{ message, time }`: the last message that profile published for that sensor, and when. A sensor or a profile with nothing published has no entry. `message` is an object for a payload sent as JSON and a string for one sent as text. `time` has the form of `captured_at`. |
+| `last_messages` | object | Sensor id to profile name to `{ message, time }`: the last message that profile published for that sensor, and when. A sensor or a profile with nothing published has no entry. `message` is an object, the payload as sent in JSON. `time` has the form of `captured_at`. |
 
 ### L0
 

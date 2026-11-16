@@ -12,7 +12,7 @@ from typing import Any
 from occupancy_service.l1 import L1Entry
 
 _SHIPPED = Path(__file__).parent / "profiles"
-_KEYS = {"topic", "payload", "retain", "qos", "repeat"}
+_KEYS = {"topic", "payload", "repeat"}
 _RAILROAD_KEYS = ("railroad_topic", "railroad_field", "railroad_stamp")
 _OPTIONAL_KEYS = {"clear_hold_s", "l0_topic", *_RAILROAD_KEYS}
 _STATES = ("occupied", "clear", "unknown")
@@ -35,7 +35,7 @@ _NOT_IN_A_TOPIC = re.compile(f"[+#{_MALFORMED}]")
 _NOT_IN_A_LEVEL = re.compile(f"[+#/{_MALFORMED}]")
 _TOPIC_BYTES = 65535  # The most a topic can hold in MQTT.
 
-type Message = str | dict[str, Any]
+type Message = dict[str, Any]
 
 
 class ProfileError(ValueError):
@@ -43,9 +43,7 @@ class ProfileError(ValueError):
 
 
 def encode(message: Message) -> bytes:
-    """What goes out: a table as JSON, and a string as text."""
-    if isinstance(message, str):
-        return message.encode(errors="replace")  # A hand-edited sensor id may not be valid text.
+    """What goes out: the table as JSON."""
     return json.dumps(message, allow_nan=False).encode()
 
 
@@ -62,14 +60,12 @@ class RailroadTopic:
 @dataclass(frozen=True)
 class Profile:
     """One loaded profile, named after its file. ``repeat`` and ``clear_hold_s`` are in seconds. A
-    ``repeat`` of 0 means no repeat, and a ``clear_hold_s`` of 0 means no hold. An ``l0_topic`` of
+    ``clear_hold_s`` of 0 means no hold. An ``l0_topic`` of
     None means it publishes no L0. A ``railroad`` of None names no railroad topic."""
 
     name: str
     topic: str
     payload: Mapping[str, Message]
-    retain: bool
-    qos: int
     repeat: float
     clear_hold_s: float = 0
     l0_topic: str | None = None
@@ -97,8 +93,7 @@ class Profile:
             values["confidence"] = float(entry.confidence or 0)
         elif entry.state == "unknown":
             values["reason"] = entry.reason or ""
-        payload = self.payload[entry.state]
-        return _fill(payload, values) if isinstance(payload, str) else _render(payload, values)
+        return _render(self.payload[entry.state], values)
 
 
 def _publishable(topic: str) -> str | None:
@@ -108,6 +103,11 @@ def _publishable(topic: str) -> str | None:
     except UnicodeEncodeError:
         return None
     return None if too_long or topic.startswith("$") else topic
+
+
+def shipped_names() -> list[str]:
+    """The names of the profiles the service ships, sorted."""
+    return sorted(path.stem for path in _SHIPPED.glob("*.toml"))
 
 
 def load_profile(name: str) -> Profile:
@@ -140,8 +140,6 @@ def _parse(name: str, table: dict[str, Any]) -> Profile:
         name=name,
         topic=_parse_topic(table["topic"]),
         payload=_parse_payload(table["payload"]),
-        retain=_parse_retain(table["retain"]),
-        qos=_parse_qos(table["qos"]),
         repeat=_parse_repeat(table["repeat"]),
         clear_hold_s=_parse_clear_hold(table.get("clear_hold_s", 0)),
         l0_topic=_parse_l0_topic(table.get("l0_topic")),
@@ -195,8 +193,8 @@ def _parse_payload(payload: Any) -> dict[str, Message]:
         if state not in payload:
             raise ValueError(f"no payload for {state}")
         message = payload[state]
-        if not isinstance(message, str | dict):
-            raise ValueError(f"payload {state} must be a string or a table")
+        if not isinstance(message, dict):
+            raise ValueError(f"payload {state} must be a table")
         _refuse_lookalikes(f"payload {state}", message)
         for name in _placeholders(message) - _PAYLOAD_PLACEHOLDERS[state]:
             raise ValueError(f"payload {state} cannot hold {{{name}}}")
@@ -205,21 +203,9 @@ def _parse_payload(payload: Any) -> dict[str, Message]:
     return payload
 
 
-def _parse_retain(retain: Any) -> bool:
-    if not isinstance(retain, bool):
-        raise ValueError("retain must be true or false")
-    return retain
-
-
-def _parse_qos(qos: Any) -> int:
-    if type(qos) is not int or qos not in (0, 1, 2):
-        raise ValueError("qos must be 0, 1 or 2")
-    return qos
-
-
 def _parse_repeat(repeat: Any) -> float:
-    if type(repeat) not in (int, float) or not math.isfinite(repeat) or repeat < 0:
-        raise ValueError("repeat must be a number of seconds from 0, where 0 means no repeat")
+    if type(repeat) not in (int, float) or not math.isfinite(repeat) or repeat <= 0:
+        raise ValueError("repeat must be a number of seconds above 0")
     return repeat
 
 

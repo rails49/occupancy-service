@@ -850,21 +850,17 @@ def test_latest_has_no_last_messages_when_nothing_publishes(tmp_path: Path) -> N
 
 def test_latest_reports_the_last_message_per_sensor_and_profile(tmp_path: Path) -> None:
     sent = {
-        "s1": {
-            "table": LastMessage({"state": "clear"}, SENT_AT),
-            "text": LastMessage("OFF", SENT_AT),
-        },
+        "s1": {"occupancy": LastMessage({"state": "clear"}, SENT_AT)},
     }
     archive = write_archive(tmp_path / "archive", ONE_SENSOR)
     with live(archive, last_messages=lambda: sent) as service:
         fields = read_latest(service).fields
         assert fields["last_messages"] == {
             "s1": {
-                "table": {
+                "occupancy": {
                     "message": {"state": "clear"},
                     "time": "2026-11-05T10:15:30.125000+00:00",
                 },
-                "text": {"message": "OFF", "time": "2026-11-05T10:15:30.125000+00:00"},
             }
         }
         assert check(service.base, timeout=5) == []
@@ -873,7 +869,8 @@ def test_latest_reports_the_last_message_per_sensor_and_profile(tmp_path: Path) 
 def test_last_messages_name_only_sensors_in_the_answer(tmp_path: Path) -> None:
     """The publisher forgets a removed sensor on its next repeat, and the answer holds to one
     manifest until then."""
-    sent = {"gone": {"p": LastMessage("OFF", SENT_AT)}, "s1": {"p": LastMessage("OFF", SENT_AT)}}
+    off = LastMessage({"s": "OFF"}, SENT_AT)
+    sent = {"gone": {"p": off}, "s1": {"p": off}}
     archive = write_archive(tmp_path / "archive", ONE_SENSOR)
     with live(archive, last_messages=lambda: sent) as service:
         assert set(read_latest(service).fields["last_messages"]) == {"s1"}
