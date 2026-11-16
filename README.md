@@ -267,6 +267,8 @@ occupancy = "unknown"
 reason = "{reason}"
 ```
 
+`addr` is the sensor's id in the archive, so for `control` each id is `<block>.<end>`, the block end the sensor watches. A block end has one publisher ([control's BUS.md](https://github.com/rails49/control/blob/main/docs/BUS.md#event-inventory)). A railroad may also have detectors of its own, such as current detection, reported by a script of the layout owner's on block ends the archive places no sensor at. How that script publishes is [control's SENSORS.md](https://github.com/rails49/control/blob/main/docs/SENSORS.md).
+
 ### Other programs
 
 A program other than control reads the `occupancy` profile: subscribe to `occupancy/+/sensor/+`, and each message is an [L1 entry](LIVE.md#l1-entry) for the sensor at the end of the topic, repeated every second. To see them:
