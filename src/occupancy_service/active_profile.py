@@ -16,14 +16,14 @@ _log = logging.getLogger(__name__)
 _STOPPED = L1Entry("unknown", reason="service stopped")
 _NOT_YET_HELD = L1Entry("unknown", reason="clear not yet held")  # A sensor with nothing sent yet.
 
-type Send = Callable[[str, bytes, int, bool], bool]
-"""``send(topic, body, qos, retain)``: whether the message went to paho. False when the connection
-is down, or paho refused the message."""
+type Send = Callable[[str, bytes], bool]
+"""``send(topic, body)``: whether the message went to paho, unretained at qos 0. False when the
+connection is down, or paho refused the message."""
 
 
 @dataclass(frozen=True)
 class LastMessage:
-    """What a profile last sent for a sensor, and when: a table as a table, a string as a string."""
+    """What a profile last sent for a sensor, and when."""
 
     message: Message
     time: datetime
@@ -77,8 +77,8 @@ def _captured_at(result: L1Result) -> datetime:
 
 
 class ActiveProfile:
-    """What one active profile sends, and what it has sent: its clear hold, the payloads a profile
-    with ``repeat = 0`` has sent, the sensors its topic cannot carry, and when it next repeats.
+    """What one active profile sends, and what it has sent: its clear hold, the sensors its topic
+    cannot carry, and when it next repeats.
 
     It sends through ``send``, and counts a message as sent only when ``send`` says so. One thread
     calls everything but ``last_messages``, which any thread may call.
@@ -88,9 +88,8 @@ class ActiveProfile:
         self.profile = profile
         self._send_to = send
         self._hold = _ClearHold(profile.clear_hold_s) if profile.clear_hold_s > 0 else None
-        self._sent: dict[str, tuple[str, bytes]] = {}  # The last topic and payload, with no repeat.
         self._refused: set[str] = set()
-        self._due: float | None = None  # Set on the first step, with a repeat.
+        self._due: float | None = None  # Set on the first step.
         self._lock = threading.Lock()
         self._last: dict[str, LastMessage] = {}
 
@@ -115,22 +114,20 @@ class ActiveProfile:
                     if self._send(sensor, entry, newest.archive_id):
                         self._hold.release(sensor, entry)
         repeat = self.profile.repeat
-        if repeat > 0:
-            if self._due is None:
-                self._due = now + repeat
-            elif self._due <= now:
-                for sensor, entry in newest.l1.items():
-                    self._report(sensor, entry, newest)
-                # On the same beat, unless it has fallen a whole interval behind.
-                next_at = self._due + repeat
-                self._due = next_at if next_at > now else now + repeat
+        if self._due is None:
+            self._due = now + repeat
+        elif self._due <= now:
+            for sensor, entry in newest.l1.items():
+                self._report(sensor, entry, newest)
+            # On the same beat, unless it has fallen a whole interval behind.
+            next_at = self._due + repeat
+            self._due = next_at if next_at > now else now + repeat
 
     def fresh(self, newest: L1Result) -> None:
-        """What a new connection carries: every sensor in ``newest``, sent even where the payload
-        is the one last sent."""
+        """What a new connection carries: every sensor in ``newest``."""
         self._forget_all_but(newest.l1)
         for sensor, entry in newest.l1.items():
-            self._report(sensor, entry, newest, fresh=True)
+            self._report(sensor, entry, newest)
 
     def stop(self, newest: L1Result) -> None:
         """``unknown`` with the reason ``service stopped`` for every sensor in ``newest``."""
@@ -139,7 +136,7 @@ class ActiveProfile:
             self._report(sensor, _STOPPED, newest)
 
     def next_due(self) -> float:
-        """The ``time.monotonic()`` of the next repeat: infinity with none, or none yet set."""
+        """The ``time.monotonic()`` of the next repeat: infinity with none yet set."""
         return math.inf if self._due is None else self._due
 
     def last_messages(self) -> dict[str, LastMessage]:
@@ -147,28 +144,22 @@ class ActiveProfile:
         with self._lock:
             return dict(self._last)
 
-    def _report(self, sensor: str, entry: L1Entry, newest: L1Result, fresh: bool = False) -> None:
+    def _report(self, sensor: str, entry: L1Entry, newest: L1Result) -> None:
         """Sends ``entry``, or while a hold is on ``sensor`` what this profile last reported."""
         if self._hold is not None:
             entry = self._hold.report(sensor, entry, _captured_at(newest))
-        self._send(sensor, entry, newest.archive_id, fresh)
+        self._send(sensor, entry, newest.archive_id)
 
-    def _send(self, sensor: str, entry: L1Entry, archive_id: str, fresh: bool = False) -> bool:
-        """Whether ``entry`` is on the topic now: sent, or with no repeat, unless ``fresh``, the
-        payload last sent there."""
+    def _send(self, sensor: str, entry: L1Entry, archive_id: str) -> bool:
+        """Whether ``entry`` went out."""
         profile = self.profile
         topic = profile.topic_for(sensor, archive_id)
         if topic is None:
             self._refuse(sensor)
             return False
         message = profile.message_for(sensor, entry)
-        body = encode(message)
-        if profile.repeat == 0 and not fresh and self._sent.get(sensor) == (topic, body):
-            return True
-        if not self._send_to(topic, body, profile.qos, profile.retain):
+        if not self._send_to(topic, encode(message)):
             return False
-        if profile.repeat == 0:
-            self._sent[sensor] = (topic, body)
         with self._lock:
             self._last[sensor] = LastMessage(message, datetime.now(UTC))
         return True
@@ -184,7 +175,6 @@ class ActiveProfile:
 
     def _forget_all_but(self, sensors: Mapping[str, L1Entry]) -> None:
         """Forgets each sensor not in ``sensors``, so one a reload adds back starts afresh."""
-        self._sent = {id: sent for id, sent in self._sent.items() if id in sensors}
         self._refused = {id for id in self._refused if id in sensors}
         with self._lock:
             self._last = {id: last for id, last in self._last.items() if id in sensors}

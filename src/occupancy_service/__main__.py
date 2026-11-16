@@ -18,7 +18,7 @@ from occupancy_service.capture import Capture, CaptureSettings
 from occupancy_service.engine_choice import AUTO
 from occupancy_service.l1 import L1Loop, L1Settings
 from occupancy_service.power import PowerGate, PowerSettings
-from occupancy_service.profile import ProfileError
+from occupancy_service.profile import ProfileError, shipped_names
 from occupancy_service.publisher import Publisher, PublisherSettings
 from occupancy_service.railroad import (
     PLACEHOLDER,
@@ -78,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile",
         action="append",
-        help="an active profile: a shipped one's name, or a file. Repeat it for more than one",
+        help=f"an active profile: {' or '.join(shipped_names())}. Repeat it for more than one",
     )
     parser.add_argument("--address", help="the address to serve HTTP on")
     parser.add_argument("--port", type=_port, help="the port to serve HTTP on")
@@ -138,6 +138,11 @@ def _built(
     except Exception as error:  # What r49.load raises for a URL is the HTTP library's to choose.
         raise _Refused(f"cannot read the archive {args.archive}: {_one_line(error)}") from error
     host, port = args.broker
+    shipped = shipped_names()
+    for name in args.profile or ():
+        if name not in shipped:
+            only = " and ".join(shipped)
+            raise _Refused(f"cannot use the profile {name}: the service ships only {only}")
     profiles = _given(profiles=tuple(args.profile) if args.profile else None)
     try:
         publisher = Publisher(PublisherSettings(host, port, **profiles), loop)

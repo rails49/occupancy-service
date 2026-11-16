@@ -21,8 +21,6 @@ NO_FRAMES = L1Entry("unknown", reason="no frames")
 OWN = "occupancy/archive-1/sensor/"
 OWN_L0 = "occupancy/archive-1/l0"
 CONTROL = "tc49/layout/sensor"
-JMRI = "track/sensor/"
-ROCRAIL = "rocrail/service/field"
 
 
 def result(
@@ -38,7 +36,7 @@ def an_l0(*detections: Any) -> L0:
 def a_profile(topic: str = "own/{sensor}", repeat: float = 0.1) -> Profile:
     """The own vocabulary's payloads, on ``topic``, with no L0."""
     shipped = load_profile("occupancy")
-    return Profile("fast", topic, shipped.payload, retain=False, qos=0, repeat=repeat)
+    return Profile("fast", topic, shipped.payload, repeat=repeat)
 
 
 def connected(*profiles: Profile) -> tuple[Sender, FakeConnection]:
@@ -56,18 +54,13 @@ def sent(message: Published) -> Any:
     return json.loads(message.body)
 
 
-def bodies(connection: FakeConnection, topic: str) -> list[bytes]:
-    return [message.body for message in connection.on(topic)]
-
-
 def test_every_profile_sends_on_the_one_connection() -> None:
     sensors = {f"s{number:02}": (OCCUPIED, CLEAR, NO_FRAMES)[number % 3] for number in range(6)}
-    sender, connection = connected(*shipped("occupancy", "control", "jmri", "rocrail"))
+    sender, connection = connected(*shipped("occupancy", "control"))
     sender.step([], result(sensors), now=0)
     for id in sensors:
-        assert connection.on(OWN + id) and connection.on(JMRI + id)
+        assert connection.on(OWN + id)
     assert {sent(message)["addr"] for message in connection.on(CONTROL)} == set(sensors)
-    assert len(connection.on(ROCRAIL)) == 6
 
 
 def test_a_new_set_of_sensors_and_a_new_id_are_reported_and_a_removed_sensor_is_not() -> None:
@@ -104,17 +97,7 @@ def test_a_clean_stop_sends_unknown_for_every_sensor() -> None:
     assert last["b"] == {"addr": "b", "occupancy": "unknown", "reason": "service stopped"}
 
 
-def test_jmri_sends_active_for_every_sensor_on_a_clean_stop() -> None:
-    sender, connection = connected(*shipped("jmri"))
-    newest = result({"a": CLEAR, "b": CLEAR})
-    sender.step([], newest, now=0)
-    sender.stop(newest)
-    for id in "ab":
-        assert bodies(connection, JMRI + id) == [b"INACTIVE", b"ACTIVE"]
-        assert connection.on(JMRI + id)[-1].retain
-
-
-def test_the_own_vocabulary_profile_sends_each_l0_once_not_retained() -> None:
+def test_the_own_vocabulary_profile_sends_each_l0_once() -> None:
     sender, connection = connected(*shipped("occupancy"))
     first_l0 = an_l0(detection(160, 120, confidence=0.7))
     sender.step([], result({"a": CLEAR}, l0=first_l0), now=0)
@@ -136,7 +119,6 @@ def test_the_own_vocabulary_profile_sends_each_l0_once_not_retained() -> None:
             }
         ],
     }
-    assert (first.qos, first.retain, second.retain) == (0, False, False)
     assert sent(second)["detections"] == []
 
 
@@ -158,12 +140,12 @@ def test_an_l0_that_arrives_while_the_connection_is_down_is_not_sent_after_it_co
 
 
 def test_a_new_confidence_alone_sends_nothing() -> None:
-    """With no repeat, only an L1 change sends, and ``L1Changes`` says a new confidence is not
+    """Before a repeat, only an L1 change sends, and ``L1Changes`` says a new confidence is not
     one."""
     changes = L1Changes()
     changes.update({"a": OCCUPIED}, manifest=None)
     subscription = changes.subscribe()
-    sender, connection = connected(a_profile(repeat=0))
+    sender, connection = connected(a_profile(repeat=60))
     sender.step([], result({"a": OCCUPIED}), now=0)
     newer = {"a": L1Entry("occupied", confidence=0.8)}
     changes.update(newer, manifest=None)
@@ -183,14 +165,18 @@ def test_with_no_connection_nothing_is_sent() -> None:
 
 def test_next_due_is_the_earliest_repeat_of_its_profiles() -> None:
     assert Sender([], None).next_due() == float("inf")
-    sender, _ = connected(*shipped("occupancy", "control", "rocrail"))
+    sender, _ = connected(*shipped("occupancy", "control"))
     sender.step([], result({"a": CLEAR}), now=10)
     assert sender.next_due() == 10.9  # control's repeat, which is sooner than occupancy's 1 s.
 
 
 def test_last_messages_are_by_sensor_then_profile() -> None:
-    sender, _ = connected(*shipped("occupancy", "jmri"))
+    sender, _ = connected(*shipped("occupancy", "control"))
     sender.step([], result({"a": CLEAR}), now=0)
     messages = sender.last_messages()["a"]
     assert messages["occupancy"].message == {"state": "clear"}
-    assert messages["jmri"].message == "INACTIVE"
+    assert messages["control"].message == {
+        "addr": "a",
+        "occupancy": "unknown",
+        "reason": "clear not yet held",
+    }

@@ -75,8 +75,8 @@ class FakeResults:
 
 
 @contextmanager
-def subscribed(broker: Broker, qos: int = 0) -> Iterator[Subscriber]:
-    subscriber = Subscriber(broker.port, qos)
+def subscribed(broker: Broker) -> Iterator[Subscriber]:
+    subscriber = Subscriber(broker.port)
     try:
         yield subscriber
     finally:
@@ -104,8 +104,6 @@ def profile_file(
     name: str = "fast",
     topic: str = "own/{sensor}",
     repeat: float = 0.1,
-    retain: bool = False,
-    qos: int = 0,
     occupied: str = '{ state = "occupied", confidence = "{confidence}" }',
     clear: str = '{ state = "clear" }',
     unknown: str = '{ state = "unknown", reason = "{reason}" }',
@@ -115,8 +113,6 @@ def profile_file(
     path = folder / f"{name}.toml"
     path.write_text(f"""
 topic = "{topic}"
-retain = {str(retain).lower()}
-qos = {qos}
 repeat = {repeat}
 clear_hold_s = {clear_hold_s}
 [payload]
@@ -181,40 +177,6 @@ def test_the_control_profile_has_exactly_its_keys_and_is_not_retained(broker: Br
         with subscribed(broker) as late:
             time.sleep(0.3)
             assert [message for message in late.messages if message.retain] == []
-
-
-def test_a_retained_profile_is_retained(broker: Broker, tmp_path: Path) -> None:
-    """Shows the test above can tell: a late subscriber does see a retained message."""
-    path = profile_file(tmp_path, retain=True, repeat=60)
-    source = FakeResults({"a": CLEAR})
-    with subscribed(broker) as first, publishing(source, settings_for(broker, path)):
-        wait_for(lambda: first.on("own/a"))
-        with subscribed(broker) as late:
-            assert late.wait_for(lambda message: message.retain).topic == "own/a"
-        source.show({"a": OCCUPIED})  # The late subscriber has not displaced the first.
-        first.wait_for(lambda message: payload(message)["state"] == "occupied")
-
-
-@pytest.mark.parametrize(("published", "delivered"), [(0, 0), (1, 1), (2, 1)])
-def test_a_profile_sets_the_qos(
-    broker: Broker, tmp_path: Path, published: int, delivered: int
-) -> None:
-    """Delivered at the lower of the publisher's QoS and the subscriber's, here 1. The broker
-    holds a QoS 2 message back until the publisher finishes its exchange."""
-    path = profile_file(tmp_path, qos=published, repeat=0.05)
-    source = FakeResults({"a": CLEAR})
-    with subscribed(broker, qos=1) as subscriber, publishing(source, settings_for(broker, path)):
-        wait_for(lambda: len(subscriber.on("own/a")) >= 3)
-    assert subscriber.on("own/a")[0].qos == delivered
-
-
-def test_a_string_payload_is_text_and_a_table_is_json(broker: Broker, tmp_path: Path) -> None:
-    path = profile_file(tmp_path, clear='"OFF {sensor}"')
-    source = FakeResults({"a": CLEAR, "b": OCCUPIED})
-    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, path)):
-        wait_for(lambda: subscriber.on("own/a") and subscriber.on("own/b"))
-    assert subscriber.on("own/a")[0].payload == b"OFF a"
-    assert subscriber.on("own/b")[0].payload == b'{"state": "occupied", "confidence": 0.93}'
 
 
 def test_every_sensor_goes_out_at_least_once_a_second_with_nothing_changing(
@@ -317,9 +279,7 @@ def test_every_profile_carries_a_drift_refusal_as_any_unknown(
 def test_a_restarted_broker_gets_every_sensor_with_no_restart_here(
     broker: Broker, tmp_path: Path
 ) -> None:
-    """Retained, with a repeat too long to help: a late subscriber sees what the new connection
-    sent, whichever of the two got to the broker first."""
-    path = profile_file(tmp_path, retain=True, repeat=60)
+    path = profile_file(tmp_path, repeat=0.2)
     source = FakeResults({"a": CLEAR, "b": CLEAR})
     settings = settings_for(broker, path)
     with publishing(source, settings):
@@ -411,7 +371,7 @@ def test_keepalive_holds_a_connection_with_nothing_to_send(
 def test_last_messages_hold_the_newest_per_sensor_and_profile(
     broker: Broker, tmp_path: Path
 ) -> None:
-    text = profile_file(tmp_path, name="text", topic="text/{sensor}", clear='"OFF"')
+    text = profile_file(tmp_path, name="text", topic="text/{sensor}", clear='{ s = "OFF" }')
     source = FakeResults({"a": CLEAR})
     with (
         subscribed(broker) as subscriber,
@@ -421,7 +381,7 @@ def test_last_messages_hold_the_newest_per_sensor_and_profile(
         wait_for(lambda: len(publisher.last_messages().get("a", {})) == 2)
         messages = publisher.last_messages()["a"]
         assert messages["occupancy"].message == {"state": "clear"}
-        assert messages["text"].message == "OFF"
+        assert messages["text"].message == {"s": "OFF"}
         before = messages["occupancy"].time
         assert before.utcoffset() is not None
         source.show({"a": OCCUPIED})
@@ -470,9 +430,7 @@ def test_a_clear_that_stands_for_the_hold_is_published_once_at_the_end_of_it(
 def test_a_reconnect_during_a_hold_reports_the_last_published_state(
     broker: Broker, tmp_path: Path
 ) -> None:
-    """Retained, with a repeat too long to help: a late subscriber sees what the new connection
-    sent, whichever of the two got to the broker first."""
-    path = profile_file(tmp_path, retain=True, repeat=60, clear_hold_s=60)
+    path = profile_file(tmp_path, repeat=0.2, clear_hold_s=60)
     source = FakeResults({"a": OCCUPIED})
     with publishing(source, settings_for(broker, path)):
         with subscribed(broker) as before:
@@ -482,8 +440,8 @@ def test_a_reconnect_during_a_hold_reports_the_last_published_state(
         broker.stop()
         broker.start()
         with subscribed(broker) as after:
-            wait_for(lambda: after.on("own/a"))
-            assert states(after) == ["occupied"]
+            wait_for(lambda: len(after.on("own/a")) >= 2)
+            assert set(states(after)) == {"occupied"}
 
 
 def test_a_hold_leaves_l1_and_its_change_count_alone(broker: Broker, tmp_path: Path) -> None:
@@ -529,19 +487,6 @@ def test_the_keepalive_is_5_s_by_default() -> None:
     assert PublisherSettings().keepalive == 5
 
 
-JMRI = "track/sensor/"
-STATES = (OCCUPIED, CLEAR, NO_FRAMES)
-
-
-def jmri_sensors(count: int) -> dict[str, L1Entry]:
-    """``count`` sensors, going round occupied, clear and unknown."""
-    return {f"s{number:02}": STATES[number % 3] for number in range(count)}
-
-
-def jmri_payload(entry: L1Entry) -> bytes:
-    return b"INACTIVE" if entry.state == "clear" else b"ACTIVE"
-
-
 def connected_clients(broker: Broker) -> list[str]:
     """The id of every connection this service made, in the broker's log."""
     return re.findall(r"New client connected from \S+ as (occupancy-service-\S+) ", read(broker))
@@ -554,208 +499,6 @@ def disconnected_clients(broker: Broker) -> list[str]:
 
 def read(broker: Broker) -> str:
     return broker.log.read_text(errors="replace")
-
-
-def retained(broker: Broker, topics: list[str]) -> dict[str, Received]:
-    """The retained message on each of ``topics``, as a new subscriber gets it."""
-    with subscribed(broker) as late:
-        wait_for(lambda: all(late.on(topic) for topic in topics))
-        return {topic: late.on(topic)[0] for topic in topics}
-
-
-def test_jmri_sends_each_state_retained_and_repeated_on_one_connection(broker: Broker) -> None:
-    sensors = jmri_sensors(50)
-    source = FakeResults(sensors)
-    topics = [JMRI + id for id in sensors]
-    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "jmri")):
-        wait_for(lambda: all(len(subscriber.on(topic)) >= 2 for topic in topics), 10)
-        for id, entry in sensors.items():
-            assert {m.payload for m in subscriber.on(JMRI + id)} == {jmri_payload(entry)}
-        # A new subscriber gets every sensor's state, as the broker kept it.
-        late = retained(broker, topics)
-        for id, entry in sensors.items():
-            assert (late[JMRI + id].payload, late[JMRI + id].retain) == (jmri_payload(entry), True)
-        (client,) = connected_clients(broker)
-        assert re.fullmatch(r"occupancy-service-[0-9a-f]{8}", client)
-
-
-def test_jmri_corrects_a_wrong_retained_value_within_about_1_s(broker: Broker) -> None:
-    source = FakeResults({"a": OCCUPIED})
-    with subscribed(broker) as subscriber, publishing(source, settings_for(broker, "jmri")):
-        subscriber.wait_for(lambda m: m.topic == JMRI + "a")
-        clicked = subscriber.client.publish(JMRI + "a", b"INACTIVE", retain=True)
-        clicked.wait_for_publish(5)
-        wrong = subscriber.wait_for(lambda m: m.payload == b"INACTIVE")
-        right = subscriber.wait_for(lambda m: m.at > wrong.at and m.payload == b"ACTIVE")
-        assert right.at - wrong.at < 1.25
-        assert retained(broker, [JMRI + "a"])[JMRI + "a"].payload == b"ACTIVE"
-
-
-def test_jmri_leaves_active_retained_on_a_clean_stop(broker: Broker) -> None:
-    sensors = {"a": CLEAR, "b": CLEAR}
-    topics = [JMRI + id for id in sensors]
-    with subscribed(broker) as subscriber:
-        with publishing(FakeResults(sensors), settings_for(broker, "jmri")):
-            wait_for(lambda: all(subscriber.on(topic) for topic in topics))
-        assert {m.payload for m in subscriber.messages if m.topic in topics} == {
-            b"INACTIVE",
-            b"ACTIVE",
-        }
-    assert {message.payload for message in retained(broker, topics).values()} == {b"ACTIVE"}
-    assert disconnected_clients(broker) == connected_clients(broker)
-    assert len(connected_clients(broker)) == 1
-
-
-def test_jmri_gives_a_restarted_broker_every_sensor_again(broker: Broker) -> None:
-    sensors = jmri_sensors(6)
-    topics = [JMRI + id for id in sensors]
-    with publishing(FakeResults(sensors), settings_for(broker, "jmri")):
-        retained(broker, topics)
-        broker.stop()
-        broker.start()  # It keeps nothing across the restart.
-        after = retained(broker, topics)
-    for id, entry in sensors.items():
-        assert after[JMRI + id].payload == jmri_payload(entry)
-
-
-def test_no_python_file_under_src_names_jmri() -> None:
-    src = Path(__file__).parent.parent / "src"
-    named = [path for path in src.rglob("*.py") if "jmri" in path.read_text().lower()]
-    assert named == []
-    assert len(list(src.rglob("*.py"))) > 3
-
-
-def on_off(broker: Broker, folder: Path, repeat: float) -> PublisherSettings:
-    """A profile whose ``occupied`` and ``unknown`` are the same payload."""
-    path = profile_file(
-        folder, topic="t/{sensor}", repeat=repeat, occupied='"ON"', clear='"OFF"', unknown='"ON"'
-    )
-    return settings_for(broker, path)
-
-
-def payloads(subscriber: Subscriber, topic: str = "t/a") -> list[bytes]:
-    return [message.payload for message in subscriber.on(topic)]
-
-
-def test_no_repeat_sends_a_change_only_where_its_payload_differs(
-    broker: Broker, tmp_path: Path
-) -> None:
-    source = FakeResults({"a": OCCUPIED})
-    with subscribed(broker) as subscriber, publishing(source, on_off(broker, tmp_path, 0)):
-        subscriber.wait_for(lambda m: m.topic == "t/a")
-        source.show({"a": NO_FRAMES})
-        source.show({"a": L1Entry("unknown", reason="scoring stalled")})
-        time.sleep(0.5)
-        assert payloads(subscriber) == [b"ON"]
-        changed_at = time.monotonic()
-        source.show({"a": CLEAR})
-        cleared = subscriber.wait_for(lambda m: m.payload == b"OFF")
-        assert cleared.at - changed_at < 0.25
-        source.show({"a": OCCUPIED})
-        subscriber.wait_for(lambda m: m.at > cleared.at and m.payload == b"ON")
-
-
-def test_no_repeat_sends_every_sensor_again_on_each_connect(broker: Broker, tmp_path: Path) -> None:
-    source = FakeResults({"a": OCCUPIED, "b": CLEAR})
-    with publishing(source, on_off(broker, tmp_path, 0)):
-        with subscribed(broker) as subscriber:
-            wait_for(lambda: subscriber.on("t/a") and subscriber.on("t/b"))
-        broker.stop()
-        broker.start()  # The publisher tries again after 1 s, and this subscriber is up by then.
-        with subscribed(broker) as subscriber:
-            wait_for(lambda: subscriber.on("t/a") and subscriber.on("t/b"))
-            assert (payloads(subscriber, "t/a"), payloads(subscriber, "t/b")) == ([b"ON"], [b"OFF"])
-
-
-ROCRAIL = "rocrail/service/field"
-
-
-def fb(sensor: str, state: bool) -> bytes:
-    return f'<fb id="{sensor}" state="{str(state).lower()}"/>'.encode()
-
-
-def on_rocrail(subscriber: Subscriber, sensor: str) -> list[Received]:
-    """What went out for ``sensor`` on Rocrail's one topic."""
-    return [m for m in subscriber.on(ROCRAIL) if f'id="{sensor}"'.encode() in m.payload]
-
-
-def test_rocrail_sends_each_state_once_at_qos_1_and_not_retained(broker: Broker) -> None:
-    source = FakeResults({"occupied": OCCUPIED, "clear": CLEAR, "unknown": NO_FRAMES})
-    with (
-        subscribed(broker, qos=1) as subscriber,
-        publishing(source, settings_for(broker, "rocrail")),
-    ):
-        wait_for(lambda: len(subscriber.on(ROCRAIL)) == 3)
-        time.sleep(1.5)  # Past what a repeat of 1 s would send.
-        assert sorted((m.payload, m.qos, m.retain) for m in subscriber.messages) == [
-            (fb("clear", False), 1, False),
-            (fb("occupied", True), 1, False),
-            (fb("unknown", True), 1, False),
-        ]
-        with subscribed(broker) as late:
-            time.sleep(0.5)
-            assert late.messages == []
-        assert len(connected_clients(broker)) == 1
-
-
-def test_rocrail_sends_a_change_only_where_true_or_false_changes(broker: Broker) -> None:
-    source = FakeResults({"a": OCCUPIED})
-    with (
-        subscribed(broker, qos=1) as subscriber,
-        publishing(source, settings_for(broker, "rocrail")),
-    ):
-        subscriber.wait_for(lambda m: m.payload == fb("a", True))
-        source.show({"a": NO_FRAMES})  # occupied to unknown
-        source.show({"a": L1Entry("unknown", reason="scoring stalled")})  # A new reason.
-        time.sleep(0.5)
-        assert [m.payload for m in on_rocrail(subscriber, "a")] == [fb("a", True)]
-        changed_at = time.monotonic()
-        source.show({"a": CLEAR})  # unknown to clear
-        cleared = subscriber.wait_for(lambda m: m.payload == fb("a", False))
-        assert cleared.at - changed_at < 0.25
-
-
-def test_rocrail_gives_a_restarted_broker_every_sensor_again(broker: Broker) -> None:
-    sensors = {"a": OCCUPIED, "b": CLEAR, "c": NO_FRAMES}
-    with publishing(FakeResults(sensors), settings_for(broker, "rocrail")):
-        with subscribed(broker, qos=1) as subscriber:
-            wait_for(lambda: len(subscriber.on(ROCRAIL)) == 3)
-        broker.stop()
-        broker.start()  # The publisher tries again after 1 s, and this subscriber is up by then.
-        with subscribed(broker, qos=1) as subscriber:
-            wait_for(lambda: len(subscriber.on(ROCRAIL)) == 3)
-            assert sorted(m.payload for m in subscriber.on(ROCRAIL)) == sorted(
-                [fb("a", True), fb("b", False), fb("c", True)]
-            )
-
-
-def test_a_message_a_stalled_broker_never_acknowledged_does_not_reach_the_next_one(
-    broker: Broker, tmp_path: Path
-) -> None:
-    """At QoS 1 with no repeat, as on Rocrail: only the state at the reconnect goes out."""
-    path = profile_file(
-        tmp_path,
-        topic="t/{sensor}",
-        repeat=0,
-        qos=1,
-        occupied='"ON"',
-        clear='"OFF"',
-        unknown='"ON"',
-    )
-    source = FakeResults({"a": CLEAR})
-    with publishing(source, settings_for(broker, path)):
-        with subscribed(broker, qos=1) as before:
-            before.wait_for(lambda m: m.payload == b"OFF")
-        broker.stall()
-        source.show({"a": OCCUPIED})
-        time.sleep(0.3)  # Sent, on a connection that still looks up, and never acknowledged.
-        broker.kill()
-        source.show({"a": CLEAR})
-        broker.start()  # The publisher tries again after 1 s, and this subscriber is up by then.
-        with subscribed(broker, qos=1) as after:
-            after.wait_for(lambda m: m.topic == "t/a")
-            time.sleep(0.5)
-            assert payloads(after) == [b"OFF"]
 
 
 class FailingResults(FakeResults):
@@ -785,13 +528,6 @@ def test_a_connection_that_cannot_be_made_is_logged_and_stop_returns(
     wait_for(lambda: publisher_errors(caplog))
     publisher.stop()
     assert len(publisher_errors(caplog)) == 1
-
-
-def test_no_python_file_under_src_names_rocrail() -> None:
-    src = Path(__file__).parent.parent / "src"
-    named = [path for path in src.rglob("*.py") if "rocrail" in path.read_text().lower()]
-    assert named == []
-    assert len(list(src.rglob("*.py"))) > 3
 
 
 def test_one_l0_message_per_detector_run_on_the_real_loop(broker: Broker, tmp_path: Path) -> None:
@@ -827,11 +563,11 @@ def test_the_paho_connection_is_fresh_once_and_ends_with_a_disconnect(broker: Br
         clean = connect("occupancy-service-clean", "clean")
         wait_for(clean.is_connected)
         assert clean.take_fresh() and not clean.take_fresh()
-        assert clean.publish("said/clean", b"hello", 0, False)
+        assert clean.publish("said/clean", b"hello")
         subscriber.wait_for(lambda m: m.topic == "said/clean")
         clean.disconnect()
         clean.join()
-        assert clean.has_ended() and not clean.publish("said/clean", b"again", 0, False)
+        assert clean.has_ended() and not clean.publish("said/clean", b"again")
     assert disconnected_clients(broker) == ["occupancy-service-clean"]
 
 
@@ -879,9 +615,9 @@ def sent(message: Published) -> Any:
 
 def test_one_connection_with_a_random_client_id_is_disconnected_and_joined_once_on_stop() -> None:
     source = FakeResults({"a": OCCUPIED})
-    with faked(source, "occupancy", "control", "jmri", "rocrail") as (_, connect):
+    with faked(source, "occupancy", "control") as (_, connect):
         shared = shared_connected(connect)
-        wait_for(lambda: shared.on(OWN + "a") and shared.on(JMRI + "a"))
+        wait_for(lambda: shared.on(OWN + "a") and shared.on(CONTROL))
     assert len(connect.made) == 1
     assert re.fullmatch(r"occupancy-service-[0-9a-f]{8}", shared.client_id)
     assert sent(shared.on(OWN + "a")[-1]) == {"state": "unknown", "reason": "service stopped"}
@@ -900,9 +636,9 @@ def test_an_error_in_the_sending_loop_is_logged_and_disconnects_cleanly_sending_
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     source = FailingResults({"a": CLEAR, "b": CLEAR})
-    with faked(source, "jmri", "occupancy") as (_, connect):
+    with faked(source, "control", "occupancy") as (_, connect):
         shared = shared_connected(connect)
-        wait_for(lambda: shared.on(JMRI + "b") and shared.on(OWN + "b"))
+        wait_for(lambda: shared.on(CONTROL) and shared.on(OWN + "b"))
         source.failing = True
         wait_for(lambda: shared.joins == 1)
         sent_before = list(shared.published)

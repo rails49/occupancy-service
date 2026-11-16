@@ -1,5 +1,6 @@
 """What one active profile sends, on a ``send`` that records it: no broker, threads or sleeps."""
 
+import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -25,17 +26,17 @@ class Sent:
     """A ``send`` that records what it is given, and fails while ``up`` is false."""
 
     up: bool = True
-    messages: list[tuple[str, bytes, int, bool]] = field(default_factory=list)
-    refused: list[tuple[str, bytes, int, bool]] = field(default_factory=list)
+    messages: list[tuple[str, bytes]] = field(default_factory=list)
+    refused: list[tuple[str, bytes]] = field(default_factory=list)
 
-    def __call__(self, topic: str, body: bytes, qos: int, retain: bool) -> bool:
-        (self.messages if self.up else self.refused).append((topic, body, qos, retain))
+    def __call__(self, topic: str, body: bytes) -> bool:
+        (self.messages if self.up else self.refused).append((topic, body))
         return self.up
 
     def bodies(self, sensor: str = "a") -> list[str]:
-        """What went out on ``sensor``'s topic, whose last level is the sensor's id."""
+        """The ``s`` of what went out on ``sensor``'s topic, whose last level is the sensor's id."""
         return [
-            body.decode() for topic, body, _, _ in self.messages if topic.endswith(f"/{sensor}")
+            json.loads(body)["s"] for topic, body in self.messages if topic.endswith(f"/{sensor}")
         ]
 
     def clear(self) -> None:
@@ -44,18 +45,16 @@ class Sent:
 
 
 def a_profile(
-    repeat: float = 0,
+    repeat: float = 60,
     clear_hold_s: float = 0,
     topic: str = "t/{sensor}",
     unknown: str = "? {reason}",
 ) -> Profile:
-    """A text profile, so each payload reads as itself."""
+    """A profile whose payload is one short field ``s``, so each reads at a glance."""
     return Profile(
         name="p",
         topic=topic,
-        payload={"occupied": "ON", "clear": "OFF", "unknown": unknown},
-        retain=True,
-        qos=1,
+        payload={"occupied": {"s": "ON"}, "clear": {"s": "OFF"}, "unknown": {"s": unknown}},
         repeat=repeat,
         clear_hold_s=clear_hold_s,
     )
@@ -81,20 +80,17 @@ def active(profile: Profile) -> tuple[ActiveProfile, Sent]:
 # What goes out, and how.
 
 
-def test_fresh_sends_every_sensor_on_its_topic_with_the_profiles_qos_and_retain() -> None:
+def test_fresh_sends_every_sensor_on_its_topic() -> None:
     profile, sent = active(a_profile())
     profile.fresh(result({"a": OCCUPIED, "b": NO_FRAMES}))
-    assert sent.messages == [
-        ("t/a", b"ON", 1, True),
-        ("t/b", b"? no frames", 1, True),
-    ]
+    assert sent.messages == [("t/a", b'{"s": "ON"}'), ("t/b", b'{"s": "? no frames"}')]
 
 
 def test_a_change_sends_the_sensors_entry_in_the_newest_result_and_only_that_sensor() -> None:
     profile, sent = active(a_profile(repeat=60))
     profile.step([], result({"a": CLEAR, "b": CLEAR}), now=0)
     profile.step(changes(a=OCCUPIED), result({"a": STALLED, "b": CLEAR}), now=1)
-    assert sent.messages == [("t/a", b"? scoring stalled", 1, True)]
+    assert sent.messages == [("t/a", b'{"s": "? scoring stalled"}')]
 
 
 def test_a_sensor_that_changes_more_than_once_between_passes_sends_its_newest_entry_once() -> None:
@@ -123,14 +119,6 @@ def test_stop_sends_unknown_for_every_sensor() -> None:
 # The repeat.
 
 
-def test_a_profile_with_no_repeat_is_never_due() -> None:
-    profile, sent = active(a_profile(repeat=0))
-    profile.step([], result({"a": CLEAR}), now=0)
-    assert profile.next_due() == float("inf")
-    profile.step([], result({"a": CLEAR}), now=1e9)
-    assert sent.messages == []
-
-
 def test_the_repeat_sends_every_sensor_on_the_same_beat() -> None:
     profile, sent = active(a_profile(repeat=1))
     profile.step([], result({"a": CLEAR, "b": OCCUPIED}), now=10)
@@ -155,52 +143,6 @@ def test_a_profile_that_repeats_sends_a_change_whose_payload_is_unchanged() -> N
     profile, sent = active(a_profile(repeat=60, unknown="ON"))
     profile.fresh(result({"a": OCCUPIED}))
     profile.step(changes(a=NO_FRAMES), result({"a": NO_FRAMES}), now=0)
-    assert sent.bodies() == ["ON", "ON"]
-
-
-# A profile with repeat = 0.
-
-
-def test_no_repeat_sends_a_change_only_where_its_payload_differs() -> None:
-    profile, sent = active(a_profile(repeat=0, unknown="ON"))
-    profile.fresh(result({"a": OCCUPIED}))
-    profile.step(changes(a=NO_FRAMES), result({"a": NO_FRAMES}), now=0)
-    profile.step(changes(a=STALLED), result({"a": STALLED}), now=1)
-    assert sent.bodies() == ["ON"]
-    profile.step(changes(a=CLEAR), result({"a": CLEAR}), now=2)
-    profile.step(changes(a=OCCUPIED), result({"a": OCCUPIED}), now=3)
-    assert sent.bodies() == ["ON", "OFF", "ON"]
-
-
-def test_no_repeat_sends_everything_on_fresh_even_where_unchanged() -> None:
-    profile, sent = active(a_profile(repeat=0))
-    profile.fresh(result({"a": OCCUPIED}))
-    profile.fresh(result({"a": OCCUPIED}))
-    assert sent.bodies() == ["ON", "ON"]
-
-
-def test_no_repeat_sends_stop_only_where_the_payload_differs() -> None:
-    profile, sent = active(a_profile(repeat=0, unknown="ON"))
-    profile.fresh(result({"a": OCCUPIED, "b": CLEAR}))
-    profile.stop(result({"a": OCCUPIED, "b": CLEAR}))
-    assert (sent.bodies("a"), sent.bodies("b")) == (["ON"], ["OFF", "ON"])
-
-
-def test_no_repeat_does_not_count_a_send_that_failed() -> None:
-    profile, sent = active(a_profile(repeat=0))
-    profile.fresh(result({"a": OCCUPIED}))
-    sent.up = False
-    profile.step(changes(a=CLEAR), result({"a": CLEAR}), now=0)
-    sent.up = True
-    profile.step(changes(a=CLEAR), result({"a": CLEAR}), now=1)
-    assert sent.bodies() == ["ON", "OFF"]
-
-
-def test_no_repeat_sends_a_sensor_a_reload_adds_back_on_its_first_change() -> None:
-    profile, sent = active(a_profile(repeat=0))
-    profile.fresh(result({"a": OCCUPIED}))
-    profile.step([], result({"b": CLEAR}), now=0)
-    profile.step(changes(a=OCCUPIED), result({"a": OCCUPIED, "b": CLEAR}), now=1)
     assert sent.bodies() == ["ON", "ON"]
 
 
@@ -247,23 +189,12 @@ def test_last_messages_hold_the_newest_sent_per_sensor() -> None:
     profile.fresh(result({"a": CLEAR, "b": OCCUPIED}))
     profile.step(changes(a=OCCUPIED), result({"a": OCCUPIED, "b": OCCUPIED}), now=0)
     last = profile.last_messages()
-    assert {sensor: sent.message for sensor, sent in last.items()} == {"a": "ON", "b": "ON"}
+    assert {sensor: sent.message for sensor, sent in last.items()} == {
+        "a": {"s": "ON"},
+        "b": {"s": "ON"},
+    }
     assert last["a"].time >= before
     assert last["a"].time.utcoffset() is not None
-
-
-def test_last_messages_keep_a_table_as_a_table() -> None:
-    profile = Profile(
-        name="p",
-        topic="t/{sensor}",
-        payload={"occupied": {"state": "occupied"}, "clear": {"state": "clear"}, "unknown": "?"},
-        retain=False,
-        qos=0,
-        repeat=0,
-    )
-    active_profile = ActiveProfile(profile, Sent())
-    active_profile.fresh(result({"a": CLEAR}))
-    assert active_profile.last_messages()["a"].message == {"state": "clear"}
 
 
 def test_last_messages_skip_what_failed_and_what_was_refused() -> None:
@@ -319,7 +250,7 @@ def test_until_then_the_repeat_and_fresh_report_what_was_last_sent() -> None:
     profile.step([], result({"a": CLEAR}, 1), now=5)
     profile.fresh(result({"a": CLEAR}, 2))
     assert sent.bodies() == ["ON", "ON", "ON"]
-    assert profile.last_messages()["a"].message == "ON"
+    assert profile.last_messages()["a"].message == {"s": "ON"}
 
 
 def test_a_break_in_clear_already_gone_from_the_newest_result_restarts_the_hold() -> None:
@@ -398,13 +329,13 @@ def test_a_hold_is_released_only_when_the_clear_that_ends_it_is_sent() -> None:
     profile.step(changes(a=CLEAR), result({"a": CLEAR}, 0), now=0)
     sent.up = False
     profile.step([], result({"a": CLEAR}, 1), now=1)
-    assert [body for _, body, _, _ in sent.refused] == [b"OFF"]
+    assert [json.loads(body)["s"] for _, body in sent.refused] == ["OFF"]
     sent.up = True
     profile.fresh(result({"a": CLEAR}, 1.1))
     assert sent.bodies()[-1] == "ON"
     profile.step([], result({"a": CLEAR}, 1.2), now=2)
     assert sent.bodies()[-1] == "OFF"
-    assert profile.last_messages()["a"].message == "OFF"
+    assert profile.last_messages()["a"].message == {"s": "OFF"}
 
 
 def test_with_no_hold_clear_goes_out_at_once() -> None:
