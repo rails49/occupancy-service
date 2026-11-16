@@ -349,14 +349,18 @@ def test_an_unknown_profile_refuses_the_process_with_no_port_left_bound(
         probe.bind(("127.0.0.1", port))
 
 
-@pytest.mark.parametrize("name", ["jmri", "rocrail", "file"])
+@pytest.mark.parametrize("name", ["jmri", "rocrail"])
 def test_a_profile_that_is_not_shipped_refuses_the_process(
     tmp_path: Path, archive: Path, name: str
 ) -> None:
-    if name == "file":
-        shipped = Path(__file__).parent.parent / "src/occupancy_service/profiles/occupancy.toml"
-        name = str(shutil.copy(shipped, tmp_path / "mine.toml"))
     assert name in assert_refused(tmp_path, archive, "--profile", name)
+
+
+def test_a_profile_file_refuses_the_process(tmp_path: Path, archive: Path) -> None:
+    """Even a copy of a shipped profile."""
+    shipped = Path(__file__).parent.parent / "src" / "occupancy_service" / "profiles"
+    path = str(shutil.copy(shipped / "occupancy.toml", tmp_path / "mine.toml"))
+    assert path in assert_refused(tmp_path, archive, "--profile", path)
 
 
 def test_a_refusal_comes_before_anything_the_model_writes(tmp_path: Path, archive: Path) -> None:

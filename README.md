@@ -205,7 +205,6 @@ A sensor id or archive `id` that a topic holding it cannot carry, because it has
 The connection has no last will. MQTT allows one will per connection, so a will on each sensor's topic would need a connection per sensor, and a will never covered a hung service whose connection stays up. A service that is killed, whose host or network fails, that hangs, or whose publisher fails, stops sending, and the broker sends nothing for it. What each controller sees then:
 
 - `control`: its timer per sensor reads `unknown` after 3 s with no report.
-- A program reading the [`occupancy` profile](#other-programs) can do what `control` does: take a sensor as `unknown` after 3 s with no message.
 
 ### Holding `clear`
 

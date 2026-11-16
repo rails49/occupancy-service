@@ -60,8 +60,8 @@ class RailroadTopic:
 @dataclass(frozen=True)
 class Profile:
     """One loaded profile, named after its file. ``repeat`` and ``clear_hold_s`` are in seconds. A
-    ``clear_hold_s`` of 0 means no hold. An ``l0_topic`` of
-    None means it publishes no L0. A ``railroad`` of None names no railroad topic."""
+    ``clear_hold_s`` of 0 means no hold. An ``l0_topic`` of None means it publishes no L0. A
+    ``railroad`` of None names no railroad topic."""
 
     name: str
     topic: str

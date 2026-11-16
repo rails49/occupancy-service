@@ -75,8 +75,8 @@ class FakeResults:
 
 
 @contextmanager
-def subscribed(broker: Broker, qos: int = 0) -> Iterator[Subscriber]:
-    subscriber = Subscriber(broker.port, qos)
+def subscribed(broker: Broker) -> Iterator[Subscriber]:
+    subscriber = Subscriber(broker.port)
     try:
         yield subscriber
     finally:
